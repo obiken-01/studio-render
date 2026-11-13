@@ -35,6 +35,21 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/app" studio-render-dev ruff check .
 
 Rebuild the image only when dependencies change.
 
+### Pinned dependencies
+
+`pyproject.toml` lists the direct dependencies; `constraints.txt` pins every installed package
+to the exact version the test suite passed with, and every `pip install` in the Dockerfile uses
+`-c constraints.txt`. To move to newer versions:
+
+1. Temporarily build without the pins: delete the version lines from `constraints.txt` (keep
+   the file), then `docker build --target dev -t studio-render-dev .`.
+2. Run the full test suite and ruff in that image (commands above).
+3. Write the new pins from the tested image:
+   `docker run --rm studio-render-dev pip freeze --exclude-editable >> constraints.txt`
+   (keep the comment header at the top).
+4. Rebuild both images (`--target dev` and `--target prod`), run the tests again and run the
+   prod smoke check in [docs/DEPLOY.md](docs/DEPLOY.md), then commit `constraints.txt`.
+
 ## Deployment
 
 See [docs/DEPLOY.md](docs/DEPLOY.md). The prod image runs as an unprivileged user with a single
@@ -69,18 +84,23 @@ every file belongs to it.
 | `POST /uploads` | Body `{filename, size, kind}`, where `kind` is `video`, `photo` or `audio`. Allowed extensions: mp4, mov (video); jpg, jpeg, png, heic, heif (photo); mp3, m4a, wav (audio). Checks type, size, project total and free disk. Returns `{uploadId, chunkSize, totalChunks}`; the chunk size is 8 MB. |
 | `PUT /uploads/{uploadId}/chunks/{n}` | Raw body, one chunk (`n` starts at 0). Resending a chunk overwrites it. Returns `{received: [...]}`. |
 | `GET /uploads/{uploadId}` | Returns `{received, totalChunks}`, so an interrupted upload can resume. |
-| `POST /uploads/{uploadId}/complete` | Checks that every chunk arrived, probes the file with ffprobe and returns its metadata: `fileId`, `kind`, `filename`, `size`, `durationSec`, `width`, `height`, `fps`, `rotation`. HEIC and HEIF photos are converted to JPEG. An unreadable file is rejected. |
+| `DELETE /uploads/{uploadId}` | Cancels an upload in progress: removes it and its partly written file and frees its space in the project total. 404 `unknown_upload` if there is no such upload. |
+| `POST /uploads/{uploadId}/complete` | Checks that every chunk arrived, probes the file and returns its metadata: `fileId`, `kind`, `filename`, `size`, `durationSec`, `width`, `height`, `fps`, `rotation`, `createdAt` (epoch seconds; the file expires `STUDIO_TTL_HOURS` after it). Every photo (JPG, PNG, HEIC, HEIF) is stored once as an upright RGB JPEG (EXIF orientation applied, quality 92, long side at most 4320 px, never upscaled), so `width`, `height` and `size` describe the stored JPEG. Photos over 200 megapixels are rejected. A song longer than 15 minutes is rejected (`audio_too_long`). An unreadable file is rejected. |
 | `POST /projects/analyze` | Body `{musicFileId}`. Returns `{beats, tempo, durationSec}`. Cached per file. |
 | `POST /projects/draft` | Body `{fileIds, musicFileId, aspect, pace, length, startSec?, audioMode, seed, template?}`. Returns `{editList, warnings}`. `aspect` is `9:16`, `16:9` or `4:5`; `pace` is `calm`, `medium` or `fast`; `length` is `15`, `30`, `60` or `"all"`; `audioMode` is `music` or `silent`. Unknown fields are rejected. |
-| `POST /renders` | Body is an edit list. It is validated, then queued. Returns 202 `{jobId}`. |
+| `POST /renders` | Body is an edit list (at most 600 timeline segments and 5000 beats). It is validated, then queued. With `audioMode: "music"` the music range must lie within the song (`bad_music_range`). Returns 202 `{jobId}`. |
 | `GET /renders/{jobId}` | Returns `{jobId, status, percent, position, message}`. `status` is `queued` (with `position`), `running` (with `percent`), `done` or `failed` (with `message`). |
 | `POST /renders/{jobId}/download-link` | Only for a finished render. Returns `{url, expiresInSec}`: a path with a random token, valid for 300 seconds. |
 | `GET /renders/{jobId}/file?token=...` | Streams the mp4 as an attachment. No Bearer header; the token authorises it. The mp4 is deleted 15 minutes after a download completes. |
 | `DELETE /files/{fileId}` | Deletes one uploaded file. |
 | `DELETE /renders/{jobId}` | Removes one render and its output (cancels it if still queued or running). |
+| `GET /projects/current` | Everything the server holds, so a reloaded page can pick up again: `{files, uploads, renders, limits, usedBytes}`. `files` are the completed files (same fields as `complete`, oldest first). `uploads` are uploads in progress: `{uploadId, filename, size, kind, chunkSize, totalChunks, received}`. `renders` are the render jobs (same fields as `GET /renders/{jobId}`, oldest first). `limits` is `{maxFileBytes, maxProjectBytes, ttlHours, chunkSize}`. `usedBytes` counts completed files plus the full declared size of uploads in progress. |
 | `DELETE /projects/current` | Clears the whole project: every upload and file, and every render. |
 
 The delete routes return `{"data": null, "message": null}`.
+
+Request bodies are limited to 1 MB (413 `body_too_large`), checked before authentication and
+before the body is read. The chunk upload `PUT` is the exception: it takes up to one 8 MB chunk.
 
 ### Draft warnings
 
@@ -102,15 +122,20 @@ The delete routes return `{"data": null, "message": null}`.
 | 403 | `forbidden` | Not a Work account, or not on the allowlist. |
 | 403 | `bad_download_link` | Download token wrong, expired or for another render. |
 | 404 | `unknown_upload`, `unknown_file`, `unknown_render` | The id does not exist or has expired. |
+| 404 | `not_found` | No route at that path. |
+| 405 | `method_not_allowed` | The path exists but not with that method (the `Allow` header lists the methods). |
 | 409 | `upload_incomplete` | `complete` was called before all chunks arrived; `details.missing` lists them. |
 | 409 | `not_ready` | A download link was requested before the render finished. |
 | 413 | `file_too_large`, `project_too_large`, `chunk_too_large` | A size limit was exceeded. |
+| 413 | `body_too_large` | The request body is over 1 MB (every route except the chunk upload). |
 | 415 | `unsupported_type` | The extension is not allowed for that `kind`. |
 | 422 | `invalid_request` | The body failed validation (`details.errors` lists the fields), or the file size is not valid. |
 | 422 | `unknown_file`, `wrong_file_kind` | A file id in an analyze, draft or render request is missing or is the wrong kind. |
-| 422 | `unreadable_file` | ffprobe or the image decoder cannot read the upload. |
+| 422 | `unreadable_file` | ffprobe, the audio decoder or the image decoder cannot read the upload (also a photo over 200 megapixels). |
+| 422 | `audio_too_long` | The song is longer than 15 minutes (checked at `complete`). |
 | 422 | `no_beats`, `not_enough_footage`, `template_too_long` | A draft cannot be built from the given music, footage or template. |
-| 422 | `bad_project`, `bad_transition`, `bad_trim`, `duration_mismatch`, `timeline_gap`, `unfilled_slots` | The edit list sent to `POST /renders` is not valid. |
+| 422 | `bad_project`, `bad_transition`, `bad_trim`, `bad_music_range`, `duration_mismatch`, `timeline_gap`, `unfilled_slots` | The edit list sent to `POST /renders` is not valid. |
 | 429 | `queue_full` | `STUDIO_QUEUE_MAX` renders are already waiting. |
-| 500 | `server_error` | Unhandled error. No details are returned. |
+| other 4xx | `http_error` | Any other framework-level error. |
+| 500 | `server_error` | Unhandled error. No details are returned; CORS headers are still sent. |
 | 507 | `disk_full` | Not enough free disk. |

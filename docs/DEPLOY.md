@@ -1,8 +1,11 @@
 # Deploying studio-render to Railway
 
 This is for Ralph. The service is one Docker container. The GitHub repo
-`obiken-01/studio-render` already exists (remote `origin`). Nothing below has been done for you:
-no push, no Railway service, no DNS change.
+`obiken-01/studio-render` already exists (remote `origin`), and the branch `feature/phase-1` has
+been pushed to it. Commits made after that push are only local: run `git status` and push the
+branch if it says it is ahead of `origin/feature/phase-1`. Nothing else below has been done for
+you: `feature/phase-1` is not merged into `main`, and there is no Railway service and no DNS
+change.
 
 ## Read this first
 
@@ -37,7 +40,7 @@ no push, no Railway service, no DNS change.
    | `JWT_SECRET_KEY` | Copy from the API service's `Jwt__SecretKey`. Must be identical to it and at least 32 characters, or the service will not start. |
    | `JWT_ISSUER` | Copy from the API service's `Jwt__Issuer`. Must not be empty. |
    | `JWT_AUDIENCE` | Copy from the API service's `Jwt__Audience`. Must not be empty. |
-   | `STUDIO_ALLOWED_USER_IDS` | Your Work user id. Sign in to the tools app, then open `https://api.ralphalcaide.com/api/work/auth/me` in the same browser and read the id from the response. Several ids can be comma-separated. If it is empty, nobody can get in. |
+   | `STUDIO_ALLOWED_USER_IDS` | Your Work user id: the `sub` claim of your Work token. See "Find your user id" below. Several ids can be comma-separated. If it is empty, nobody can get in. |
    | `CORS_ALLOWED_ORIGINS` | `https://tools.ralphalcaide.com` (no trailing slash). Add more origins comma-separated if you want a local dev origin. |
 
    Do not set `PORT`. Railway provides it and the image reads it. Optional limits and their
@@ -45,12 +48,22 @@ no push, no Railway service, no DNS change.
    `STUDIO_MAX_FILE_GB` (3), `STUDIO_MAX_PROJECT_GB` (10), `STUDIO_RENDER_TIMEOUT_MIN` (30),
    `STUDIO_QUEUE_MAX` (3). The secret goes into Railway only, never into the repo.
 
-4. **Check what the plan gives you.** After the first deploy, open the service settings and note
-   the RAM and disk. The service needs free disk for the uploaded sources plus the render output.
-   An upload is refused when free space is below that file's own size, and a render fails
-   when less than 2 GB is free at the moment it starts. Set
-   `STUDIO_MAX_PROJECT_GB` below the real free disk and `STUDIO_MAX_FILE_GB` below that. If
-   renders get killed for memory, lower the limits or move to a larger plan.
+4. **Set the disk limits by hand.** After the first deploy, open the service settings and note
+   the RAM and the ephemeral disk size. The service needs disk for the uploaded sources plus one
+   render's output and scratch files (about 2 GB).
+
+   The automatic free-disk checks (an upload is refused when free space is below that file's
+   size; a render fails when less than 2 GB is free when it starts) **may not see Railway's
+   per-service disk quota**. Inside a container the reported free space is usually the host
+   machine's, and an upload's space is not counted until its chunks arrive. So do not rely on
+   them: set `STUDIO_MAX_PROJECT_GB` below the real ephemeral disk size minus about 2 GB for one
+   render (for example 8 on a 10 GB disk, 3 on a 5 GB disk), and `STUDIO_MAX_FILE_GB` no higher
+   than that. The defaults (3 and 10) assume a large disk. If Railway evicts the service for
+   disk, lower them. If renders get killed for memory, lower the limits or move to a larger plan.
+
+   If you mount a Railway volume at `STUDIO_DATA_DIR`, it must be writable by uid 10001 (the
+   service user). If it is not, the service refuses to start and the log names
+   `STUDIO_DATA_DIR`.
 
 5. **Generate the public URL.** In the service's Networking tab, generate a domain, for example
    `https://studio-render-production.up.railway.app`. The tools app needs it as `VITE_STUDIO_URL`.
@@ -59,6 +72,33 @@ no push, no Railway service, no DNS change.
 
 6. **Update the main deployment doc yourself.** This repo does not edit
    `ralph-portfolio/docs/DEPLOYMENT.md`. Add the Studio row there when you are ready.
+
+## Find your user id
+
+The allowlist holds the `sub` claim of the Work token the tools app uses. A plain browser visit
+to `/api/work/auth/me` does not work: that endpoint needs the Bearer token, so it answers 401.
+Instead, sign in at https://tools.ralphalcaide.com, open the browser's DevTools console on that
+page and run:
+
+```js
+JSON.parse(atob(localStorage.getItem("work_access_token").split(".")[1]
+  .replace(/-/g, "+").replace(/_/g, "/"))).sub
+```
+
+It prints your id (the token's `sub`). The token stays in your browser; nothing is sent
+anywhere. Put that value in `STUDIO_ALLOWED_USER_IDS`.
+
+## Check the image before deploying
+
+The prod image carries a smoke script that runs as the image's own non-root user. It makes a
+short click track as wav, mp3 and m4a, runs the real beat analysis on each, and encodes one
+second of H.264 video into the data dir. It prints `prodcheck passed` and exits 0, or names the
+failed check and exits 1. It needs no secrets.
+
+```bash
+docker build --target prod -t studio-render .
+docker run --rm studio-render python scripts/prodcheck.py
+```
 
 ## After deploy
 

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.errors import register_error_handlers
-from app.routes import session, uploads
+from app.routes import projects, session, uploads
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -19,6 +19,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(session.router)
     app.include_router(uploads.router)
+    app.include_router(projects.router)
     return app
 
 

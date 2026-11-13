@@ -315,3 +315,17 @@ def test_stop_cancels_running_job_and_joins(make_queue, el):
     assert gate.started.wait(5)
     q.stop()
     assert not q._thread.is_alive()
+
+
+def test_job_running_at_graceful_stop_shows_restart_message(make_queue, el, store, settings):
+    gate = Gate()
+    q = make_queue(gate)
+    job = q.submit(el)
+    assert gate.started.wait(5)
+    q.stop()
+    again = RenderQueue(store, settings)
+    loaded, pos = again.get(job.job_id)
+    assert loaded.status == "failed" and pos is None
+    assert loaded.message == "The service restarted, please render again."
+    assert list(store.renders_dir.iterdir()) == []
+    assert list(store.work_dir.iterdir()) == []

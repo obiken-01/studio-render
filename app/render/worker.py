@@ -306,6 +306,8 @@ class RenderQueue:
             if job is not None:
                 if status == "done" and not out.exists():
                     status, message = "failed", FAILED
+                if self._stopping and status != "done":
+                    message = RESTARTED  # shutdown cancelled it, not the user
                 job.status, job.message = status, message
                 job.finished_at = self.clock()
                 if status == "done":

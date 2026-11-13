@@ -27,6 +27,20 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters")
         return value
 
+    @field_validator("jwt_issuer")
+    @classmethod
+    def _issuer_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("JWT_ISSUER must not be empty")
+        return value
+
+    @field_validator("jwt_audience")
+    @classmethod
+    def _audience_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("JWT_AUDIENCE must not be empty")
+        return value
+
     @property
     def allowed_user_ids(self) -> frozenset[str]:
         return frozenset(p.strip() for p in self.studio_allowed_user_ids.split(",") if p.strip())

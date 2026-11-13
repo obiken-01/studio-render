@@ -15,5 +15,8 @@ COPY . .
 
 FROM base AS prod
 COPY app ./app
+# Run as an unprivileged user. The default data dir must be writable by it.
+RUN useradd --system --uid 10001 --no-create-home studio     && mkdir -p /tmp/studio     && chown studio:studio /tmp/studio
+USER studio
 ENV PORT=8000
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]

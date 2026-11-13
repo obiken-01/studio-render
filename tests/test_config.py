@@ -23,3 +23,15 @@ def test_cors_origins_parse_and_trim():
     s = Settings(jwt_secret_key="x" * 32, jwt_issuer="i", jwt_audience="a",
                  cors_allowed_origins=" https://a.example , https://b.example ,")
     assert s.cors_origins == ["https://a.example", "https://b.example"]
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_issuer_refuses_to_start(value):
+    with pytest.raises(ValueError, match="JWT_ISSUER"):
+        Settings(jwt_secret_key="x" * 32, jwt_issuer=value, jwt_audience="a")
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_audience_refuses_to_start(value):
+    with pytest.raises(ValueError, match="JWT_AUDIENCE"):
+        Settings(jwt_secret_key="x" * 32, jwt_issuer="i", jwt_audience=value)

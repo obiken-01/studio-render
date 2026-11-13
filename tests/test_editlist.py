@@ -1,0 +1,157 @@
+from pathlib import Path
+
+import pytest
+from pydantic import ValidationError
+
+from app.editlist import EditList, snap, validate_for_render, validate_structure
+from app.errors import ApiError
+from app.models import FileMeta
+
+
+def _meta(file_id, kind, duration, w=None, h=None):
+    return FileMeta(file_id, kind, Path("/x"), f"{file_id}.bin", 1, duration, w, h, None, 0, 0.0)
+
+
+FILES = {
+    "v1": _meta("v1", "video", 20.0, 3840, 2160),
+    "p1": _meta("p1", "photo", None, 4000, 3000),
+    "m1": _meta("m1", "audio", 60.0),
+}
+
+
+def good() -> dict:
+    return {
+        "version": 1,
+        "project": {"aspect": "9:16", "width": 1080, "height": 1920, "fps": 30},
+        "music": {"fileId": "m1", "startSec": 10.0, "endSec": 13.0, "fadeOutSec": 1.0, "beats": []},
+        "audioMode": "music",
+        "timeline": [
+            {"type": "video", "slotStartSec": 0.0, "durationSec": 1.0,
+             "source": {"fileId": "v1", "inSec": 4.0, "outSec": 5.0}},
+            {"type": "photo", "slotStartSec": 1.0, "durationSec": 2.0,
+             "source": {"fileId": "p1"}, "motion": {"kind": "zoom_in"}},
+        ],
+    }
+
+
+def test_good_list_passes():
+    validate_for_render(EditList.model_validate(good()), FILES)
+
+
+def test_defaults_applied():
+    el = EditList.model_validate(good())
+    for seg in el.timeline:
+        assert seg.transitionOut == "cut"
+        assert (seg.crop.focusX, seg.crop.focusY) == (0.5, 0.5)
+
+
+def test_unknown_field_rejected():
+    d = good()
+    d["timeline"][0]["speed"] = 2
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)
+
+
+@pytest.mark.parametrize("mutate,code", [
+    (lambda d: d["project"].update(width=720), "bad_project"),
+    (lambda d: d["project"].update(fps=24), "bad_project"),
+    (lambda d: d["timeline"][1].update(slotStartSec=1.5), "timeline_gap"),
+    (lambda d: d["music"].update(endSec=14.0), "duration_mismatch"),
+    (lambda d: d["timeline"][0]["source"].update(fileId="zz"), "unknown_file"),
+    (lambda d: d["timeline"][0]["source"].update(fileId="p1"), "wrong_file_kind"),
+    (lambda d: d["timeline"][0]["source"].update(inSec=19.5, outSec=20.5), "bad_trim"),
+    (lambda d: d["timeline"][0]["source"].update(outSec=5.5), "bad_trim"),
+    (lambda d: d["music"].update(fileId="v1"), "wrong_file_kind"),
+    (lambda d: d["timeline"][1].update(transitionOut="crossfade"), "bad_transition"),
+])
+def test_rule_violations(mutate, code):
+    d = good()
+    mutate(d)
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert e.value.code == code
+    assert e.value.status == 422
+    assert e.value.message
+
+
+def test_structure_rules_need_no_files():
+    d = good()
+    d["timeline"][1]["slotStartSec"] = 1.5
+    with pytest.raises(ApiError) as e:
+        validate_structure(EditList.model_validate(d))
+    assert e.value.code == "timeline_gap"
+
+
+def test_empty_slots_listed():
+    d = good()
+    d["timeline"][1] = {"type": "empty", "slotStartSec": 1.0, "durationSec": 2.0}
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert e.value.code == "unfilled_slots" and e.value.details == {"indexes": [1]}
+    assert "2" in e.value.message
+
+
+def test_unfilled_slots_reported_before_other_errors():
+    d = good()
+    d["timeline"][1] = {"type": "empty", "slotStartSec": 1.0, "durationSec": 2.0}
+    d["project"]["fps"] = 24
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert e.value.code == "unfilled_slots"
+
+
+def test_crossfade_needs_tail_footage():
+    d = good()
+    d["timeline"][0]["transitionOut"] = "crossfade"
+    d["timeline"][0]["source"].update(inSec=19.0, outSec=20.0)
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert e.value.code == "bad_trim"
+
+
+def test_crossfade_with_tail_footage_passes():
+    d = good()
+    d["timeline"][0]["transitionOut"] = "crossfade"
+    validate_for_render(EditList.model_validate(d), FILES)
+
+
+def test_focus_out_of_range_rejected():
+    d = good()
+    d["timeline"][0]["crop"] = {"focusX": 1.2, "focusY": 0.5}
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)
+
+
+def test_silent_mode_still_requires_music_block():
+    d = good()
+    d["audioMode"] = "silent"
+    validate_for_render(EditList.model_validate(d), FILES)
+    del d["music"]
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)
+
+
+def test_empty_music_file_id_ok_at_model_level():
+    d = good()
+    d["music"]["fileId"] = ""
+    el = EditList.model_validate(d)
+    with pytest.raises(ApiError) as e:
+        validate_for_render(el, FILES)
+    assert e.value.code == "unknown_file"
+
+
+def test_other_aspects_accepted():
+    d = good()
+    d["project"] = {"aspect": "4:5", "width": 1080, "height": 1350, "fps": 30}
+    validate_for_render(EditList.model_validate(d), FILES)
+
+
+def test_snap():
+    assert snap(1.02) == round(31 / 30, 6) and snap(0.0) == 0.0
+
+
+def test_file_meta_public():
+    pub = FILES["v1"].public()
+    assert pub["fileId"] == "v1" and pub["durationSec"] == 20.0
+    assert set(pub) == {"fileId", "kind", "filename", "size", "durationSec",
+                        "width", "height", "fps", "rotation"}

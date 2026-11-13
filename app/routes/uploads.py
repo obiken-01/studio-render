@@ -46,6 +46,12 @@ def upload_status(upload_id: str, store: Store = Depends(get_store)):
     return ok({"received": sorted(up.received), "totalChunks": up.total_chunks})
 
 
+@router.delete("/uploads/{upload_id}")
+def cancel_upload(upload_id: str, store: Store = Depends(get_store)):
+    store.delete_upload(upload_id)
+    return ok(None)
+
+
 @router.post("/uploads/{upload_id}/complete")
 def complete_upload(upload_id: str, store: Store = Depends(get_store)):
     return ok(store.complete_upload(upload_id).public())
@@ -55,6 +61,21 @@ def complete_upload(upload_id: str, store: Store = Depends(get_store)):
 def delete_file(file_id: str, store: Store = Depends(get_store)):
     store.delete_file(file_id)
     return ok(None)
+
+
+@router.get("/projects/current")
+def current_project(store: Store = Depends(get_store), queue: RenderQueue = Depends(get_queue)):
+    """Everything the server holds for the project, so a reloaded page can pick up again."""
+    files = sorted(store.files().values(), key=lambda f: f.created_at)
+    return ok({
+        "files": [f.public() for f in files],
+        "uploads": [u.public() for u in store.uploads()],
+        "renders": [job.public(position) for job, position in queue.jobs()],
+        "limits": {"maxFileBytes": store.max_file_bytes,
+                   "maxProjectBytes": store.max_project_bytes,
+                   "ttlHours": store.ttl_hours, "chunkSize": store.chunk_size},
+        "usedBytes": store.total_bytes(),
+    })
 
 
 @router.delete("/projects/current")

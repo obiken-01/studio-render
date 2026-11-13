@@ -219,7 +219,7 @@ def test_snap():
 def test_file_meta_public():
     pub = FILES["v1"].public()
     assert pub["fileId"] == "v1" and pub["durationSec"] == 20.0
-    assert set(pub) == {"fileId", "kind", "filename", "size", "durationSec",
+    assert set(pub) == {"fileId", "kind", "filename", "size", "durationSec", "createdAt",
                         "width", "height", "fps", "rotation"}
 
 

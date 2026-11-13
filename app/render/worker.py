@@ -165,6 +165,13 @@ class RenderQueue:
                                 if jid == job_id)
             return Job(**asdict(job)), position
 
+    def jobs(self) -> list[tuple[Job, int | None]]:
+        """Every job, oldest first, with its place in line when queued."""
+        with self._lock:
+            line = {jid: i for i, (jid, _) in enumerate(self._pending, 1)}
+            return [(Job(**asdict(j)), line.get(j.job_id) if j.status == "queued" else None)
+                    for j in sorted(self._jobs.values(), key=lambda j: j.created_at)]
+
     def delete(self, job_id: str) -> None:
         with self._lock:
             if job_id not in self._jobs:

@@ -61,6 +61,7 @@ class Store:
     def __init__(self, data_dir: Path, ttl_hours: float, max_file_bytes: int,
                  max_project_bytes: int, *, chunk_size: int = CHUNK_SIZE):
         self.data_dir = Path(data_dir)
+        self.ttl_hours = ttl_hours
         self.ttl_seconds = ttl_hours * 3600
         self.max_file_bytes = max_file_bytes
         self.max_project_bytes = max_project_bytes
@@ -69,13 +70,27 @@ class Store:
         self.files_dir = self.data_dir / "files"
         self.renders_dir = self.data_dir / "renders"
         self.work_dir = self.data_dir / "work"
-        for d in (self.uploads_dir, self.files_dir, self.renders_dir, self.work_dir):
-            d.mkdir(parents=True, exist_ok=True)
+        self._check_writable()
         self._lock = threading.Lock()
         self._uploads: dict[str, Upload] = {}
         self._files: dict[str, FileMeta] = {}
         self._state_path = self.data_dir / "state.json"
         self._load()
+
+    def _check_writable(self) -> None:
+        """Fail at startup, naming the setting, if the data dir cannot be used (for example a
+        mounted volume not writable by the service user)."""
+        try:
+            for d in (self.uploads_dir, self.files_dir, self.renders_dir, self.work_dir):
+                d.mkdir(parents=True, exist_ok=True)
+            probe = self.data_dir / f".write-check-{os.getpid()}"
+            probe.write_bytes(b"ok")
+            probe.unlink()
+        except OSError as e:
+            raise RuntimeError(
+                f"STUDIO_DATA_DIR ({self.data_dir}) is not writable by this service: {e}. "
+                "Point STUDIO_DATA_DIR at a writable directory, or make the mounted volume "
+                "writable by uid 10001.") from None
 
     # ---- persistence (callers hold the lock, except __init__) ----
 
@@ -168,6 +183,21 @@ class Store:
             self._uploads[upload.upload_id] = upload
             self._save()
         return upload
+
+    def uploads(self) -> list[Upload]:
+        """Uploads still in progress, oldest first (copies, safe to read without the lock)."""
+        with self._lock:
+            return [Upload(**{**u.__dict__, "received": set(u.received)})
+                    for u in sorted(self._uploads.values(), key=lambda u: u.created_at)]
+
+    def delete_upload(self, upload_id: str) -> None:
+        """Cancel an upload in progress and free its reserved space."""
+        with self._lock:
+            up = self._uploads.pop(upload_id, None)
+            if up is None:
+                raise _unknown_upload()
+            self._unlink(self._part_path(up))
+            self._save()
 
     def get_upload(self, upload_id: str) -> Upload:
         with self._lock:

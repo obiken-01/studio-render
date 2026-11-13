@@ -73,7 +73,7 @@ def done_job(client, auth, queue, fake_el):
 
 
 @pytest.fixture
-def queued_job(client, auth, queue, fake_el):
+def running_job(client, auth, queue, fake_el):
     gate = Gate()
     queue.render_fn = gate
     job_id = client.post("/renders", headers=auth, json=fake_el).json()["data"]["jobId"]
@@ -116,14 +116,27 @@ def test_download_after_delete_is_404(client, auth, done_job):
     assert body["code"] == "unknown_render" and body["data"] is None and body["message"]
 
 
-def test_download_link_before_done(client, auth, queued_job):
-    r = client.post(f"/renders/{queued_job}/download-link", headers=auth)
+def test_download_link_while_running(client, auth, running_job):
+    r = client.post(f"/renders/{running_job}/download-link", headers=auth)
     assert r.status_code == 409 and r.json()["code"] == "not_ready"
-    status = client.get(f"/renders/{queued_job}", headers=auth).json()["data"]
+    status = client.get(f"/renders/{running_job}", headers=auth).json()["data"]
     assert status["status"] == "running" and status["position"] is None
 
 
-def test_queue_full_over_http(client, auth, queued_job, fake_el):
+def test_second_render_waits_in_line(client, auth, running_job, fake_el):
+    r = client.post("/renders", headers=auth, json=fake_el)
+    assert r.status_code == 202
+    waiting = r.json()["data"]["jobId"]
+    status = client.get(f"/renders/{waiting}", headers=auth).json()["data"]
+    assert status == {"jobId": waiting, "status": "queued", "percent": 0, "position": 1,
+                      "message": None}
+    r = client.post(f"/renders/{waiting}/download-link", headers=auth)
+    assert r.status_code == 409 and r.json()["code"] == "not_ready"
+    assert client.get(f"/renders/{running_job}", headers=auth).json()["data"]["status"] \
+        == "running"
+
+
+def test_queue_full_over_http(client, auth, running_job, fake_el):
     for _ in range(3):
         assert client.post("/renders", headers=auth, json=fake_el).status_code == 202
     r = client.post("/renders", headers=auth, json=fake_el)

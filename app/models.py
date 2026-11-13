@@ -15,6 +15,17 @@ class Upload:
     received: set[int]
     created_at: float
 
+    def public(self) -> dict:
+        return {
+            "uploadId": self.upload_id,
+            "filename": self.filename,
+            "size": self.size,
+            "kind": self.kind,
+            "chunkSize": self.chunk_size,
+            "totalChunks": self.total_chunks,
+            "received": sorted(self.received),
+        }
+
 
 @dataclass
 class FileMeta:
@@ -41,4 +52,5 @@ class FileMeta:
             "height": self.height,
             "fps": self.fps,
             "rotation": self.rotation,
+            "createdAt": self.created_at,  # epoch seconds; the file expires a TTL after this
         }

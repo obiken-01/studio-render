@@ -1,0 +1,249 @@
+import hashlib
+from types import SimpleNamespace
+
+import pytest
+from PIL import Image
+from pillow_heif import register_heif_opener
+
+from app.errors import ApiError
+from app.storage import CHUNK_SIZE, Store
+from tests.media import make_photo, make_silence, make_video
+
+MB = 1024 * 1024
+
+
+def _small_store(settings, **kw):
+    return Store(settings.studio_data_dir, ttl_hours=24, max_file_bytes=3 * 1024**3,
+                 max_project_bytes=10 * 1024**3, **kw)
+
+
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _upload_all(store, path, name, kind):
+    data = path.read_bytes()
+    up = store.create_upload(name, len(data), kind)
+    for n in range(up.total_chunks):
+        store.write_chunk(up.upload_id, n, [data[n * up.chunk_size:(n + 1) * up.chunk_size]])
+    return up
+
+
+def test_chunks_out_of_order_assemble_to_identical_bytes(settings, tmp_path):
+    original = make_video(tmp_path / "src.mp4", w=1280, h=720, dur=4)
+    size = original.stat().st_size
+    store = _small_store(settings, chunk_size=-(-size // 3))  # exactly three chunks
+    data = original.read_bytes()
+    up = store.create_upload("clip.mp4", size, "video")
+    assert up.total_chunks == 3
+    for n in (2, 0, 1):
+        store.write_chunk(up.upload_id, n, [data[n * up.chunk_size:(n + 1) * up.chunk_size]])
+    meta = store.complete_upload(up.upload_id)
+    assert _sha(meta.path) == _sha(original)
+    assert meta.width == 1280 and meta.height == 720
+    assert meta.file_id == up.upload_id
+
+
+def test_resume_reports_missing(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE * 3, "video")
+    store.write_chunk(up.upload_id, 0, [b"a" * CHUNK_SIZE])
+    store.write_chunk(up.upload_id, 2, [b"c" * CHUNK_SIZE])
+    assert store.get_upload(up.upload_id).received == {0, 2}
+
+
+def test_complete_with_missing_chunk(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE * 3, "video")
+    store.write_chunk(up.upload_id, 0, [b"a" * CHUNK_SIZE])
+    store.write_chunk(up.upload_id, 2, [b"c" * CHUNK_SIZE])
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "upload_incomplete"
+    assert e.value.details == {"missing": [1]}
+    # the upload is still there so the client can send the missing part
+    assert store.get_upload(up.upload_id).received == {0, 2}
+
+
+def test_complete_twice(store, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    up = _upload_all(store, clip, "c.mp4", "video")
+    store.complete_upload(up.upload_id)
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.status == 404
+    assert e.value.code == "unknown_upload"
+
+
+def test_oversized_chunk_rejected(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE * 2, "video")
+    with pytest.raises(ApiError) as e:
+        store.write_chunk(up.upload_id, 0, [b"x" * (CHUNK_SIZE + 1)])
+    assert e.value.status == 413
+    assert e.value.code == "chunk_too_large"
+    assert store.get_upload(up.upload_id).received == set()
+
+
+def test_oversized_chunk_rejected_when_streamed_in_pieces(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE * 2, "video")
+    pieces = (b"x" * MB for _ in range(9))
+    with pytest.raises(ApiError) as e:
+        store.write_chunk(up.upload_id, 0, pieces)
+    assert e.value.code == "chunk_too_large"
+
+
+def test_wrong_sized_chunk_rejected(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE + 10, "video")
+    with pytest.raises(ApiError) as e:
+        store.write_chunk(up.upload_id, 1, [b"x" * 11])  # last chunk must be exactly 10 bytes
+    assert e.value.code == "bad_chunk"
+    assert store.get_upload(up.upload_id).received == set()
+
+
+def test_chunk_index_out_of_range(store):
+    up = store.create_upload("clip.mp4", CHUNK_SIZE * 2, "video")
+    for n in (2, -1):
+        with pytest.raises(ApiError) as e:
+            store.write_chunk(up.upload_id, n, [b"x"])
+        assert e.value.code == "bad_chunk"
+
+
+def test_unknown_upload(store):
+    with pytest.raises(ApiError) as e:
+        store.get_upload("up_nope")
+    assert e.value.status == 404 and e.value.code == "unknown_upload"
+
+
+def test_file_too_large(settings):
+    store = Store(settings.studio_data_dir, ttl_hours=24, max_file_bytes=3 * 1024**3,
+                  max_project_bytes=10 * 1024**3)
+    with pytest.raises(ApiError) as e:
+        store.create_upload("big.mp4", 3 * 1024**3 + 1, "video")
+    assert e.value.status == 413
+    assert e.value.code == "file_too_large"
+    assert "3 GB" in e.value.message
+    assert not any((settings.studio_data_dir / "uploads").iterdir())
+
+
+def test_project_limit(settings):
+    store = Store(settings.studio_data_dir, ttl_hours=24, max_file_bytes=1000,
+                  max_project_bytes=1000)
+    store.create_upload("a.mp4", 600, "video")
+    with pytest.raises(ApiError) as e:
+        store.create_upload("b.mp4", 600, "video")
+    assert e.value.status == 413
+    assert e.value.code == "project_too_large"
+
+
+def test_bad_extension(store):
+    with pytest.raises(ApiError) as e:
+        store.create_upload("notes.txt", 10, "video")
+    assert e.value.status == 415 and e.value.code == "unsupported_type"
+
+
+def test_kind_must_match_extension(store):
+    with pytest.raises(ApiError) as e:
+        store.create_upload("a.mp4", 10, "audio")
+    assert e.value.status == 415 and e.value.code == "unsupported_type"
+
+
+def test_upper_case_extension_ok(store):
+    up = store.create_upload("CLIP.MP4", 10, "video")
+    assert up.ext == "mp4"
+
+
+def test_hostile_filename_never_touches_path(store):
+    up = store.create_upload("../../etc/passwd.mp4", 10, "video")
+    root = store.data_dir.resolve()
+    created = [p for p in store.data_dir.rglob("*") if p.is_file()]
+    assert created
+    for p in created:
+        assert root in p.resolve().parents
+        assert p.name == "state.json" or p.name.startswith(up.upload_id)
+    assert not (root.parent / "etc").exists()
+
+
+def test_audio_only_mp4_as_video_is_rejected_and_removed(store, tmp_path):
+    clip = make_silence(tmp_path / "audio_only.mp4", dur=1)
+    up = _upload_all(store, clip, "a.mp4", "video")
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "unreadable_file"
+    left = [p.name for p in store.data_dir.rglob("*") if p.is_file() and p.name != "state.json"]
+    assert left == []
+    assert store.files() == {}
+
+
+def test_heic_photo_becomes_jpeg(store, tmp_path):
+    register_heif_opener()
+    heic = tmp_path / "shot.heic"
+    Image.new("RGB", (640, 480), (10, 120, 200)).save(heic, format="HEIF")
+    up = _upload_all(store, heic, "IMG_0001.HEIC", "photo")
+    meta = store.complete_upload(up.upload_id)
+    assert meta.path.suffix == ".jpg"
+    assert (meta.width, meta.height) == (640, 480)
+    assert not list(store.files_dir.glob("*.heic"))
+    with Image.open(meta.path) as img:
+        assert img.format == "JPEG"
+
+
+def test_plain_photo_keeps_extension(store, tmp_path):
+    photo = make_photo(tmp_path / "p.jpg", w=400, h=300)
+    meta = store.complete_upload(_upload_all(store, photo, "p.JPG", "photo").upload_id)
+    assert meta.path.suffix == ".jpg"
+    assert meta.public()["width"] == 400
+
+
+def test_sweep_removes_expired(store, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    meta = store.complete_upload(_upload_all(store, clip, "c.mp4", "video").upload_id)
+    t0 = meta.created_at
+    assert store.sweep(t0 + 60) == 0
+    assert meta.path.exists()
+    assert store.sweep(t0 + 24 * 3600 + 1) == 1
+    assert not meta.path.exists()
+    assert store.files() == {}
+
+
+def test_sweep_removes_stale_unfinished_uploads(store):
+    up = store.create_upload("clip.mp4", 100, "video")
+    part = next(store.uploads_dir.iterdir())
+    assert store.sweep(up.created_at + 60) == 0
+    assert part.exists()
+    assert store.sweep(up.created_at + 24 * 3600 + 1) == 1
+    assert not part.exists()
+    with pytest.raises(ApiError):
+        store.get_upload(up.upload_id)
+
+
+def test_state_survives_restart(store, settings, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    meta = store.complete_upload(_upload_all(store, clip, "c.mp4", "video").upload_id)
+    pending = store.create_upload("later.mp4", CHUNK_SIZE * 2, "video")
+    store.write_chunk(pending.upload_id, 1, [b"z" * CHUNK_SIZE])
+    again = _small_store(settings)
+    assert again.get_file(meta.file_id) == meta
+    assert again.get_upload(pending.upload_id).received == {1}
+
+
+def test_no_disk_space(store, monkeypatch):
+    monkeypatch.setattr("app.storage.shutil.disk_usage",
+                        lambda _p: SimpleNamespace(total=100, used=99, free=5))
+    with pytest.raises(ApiError) as e:
+        store.create_upload("clip.mp4", 1000, "video")
+    assert e.value.status == 507 and e.value.code == "disk_full"
+    assert not any(store.uploads_dir.iterdir())
+
+
+def test_delete_file_and_clear(store, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    a = store.complete_upload(_upload_all(store, clip, "c.mp4", "video").upload_id)
+    b = store.complete_upload(_upload_all(store, clip, "d.mp4", "video").upload_id)
+    store.create_upload("pending.mp4", 50, "video")
+    store.delete_file(a.file_id)
+    assert not a.path.exists()
+    with pytest.raises(ApiError) as e:
+        store.get_file(a.file_id)
+    assert e.value.code == "unknown_file"
+    assert store.total_bytes() == b.size + 50
+    store.clear()
+    assert store.files() == {} and store.total_bytes() == 0
+    assert not any(store.files_dir.iterdir()) and not any(store.uploads_dir.iterdir())

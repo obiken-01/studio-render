@@ -6,10 +6,14 @@ from fractions import Fraction
 from pathlib import Path
 
 from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
 
 from app.errors import ApiError
 
 logger = logging.getLogger(__name__)
+
+# Lets Pillow (probe, upload conversion and the renderer's photo path) open HEIC/HEIF.
+register_heif_opener()
 
 
 def _unreadable() -> ApiError:

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.storage import Store, get_store  # noqa: E402
 
 
 @pytest.fixture
@@ -31,9 +32,16 @@ def settings(tmp_path):
 
 
 @pytest.fixture
-def client(settings):
+def store(settings):
+    return Store(settings.studio_data_dir, ttl_hours=24, max_file_bytes=3 * 1024**3,
+                 max_project_bytes=10 * 1024**3)
+
+
+@pytest.fixture
+def client(settings, store):
     app = create_app(settings)
     app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_store] = lambda: store
     return TestClient(app)
 
 

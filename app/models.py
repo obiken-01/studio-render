@@ -4,6 +4,19 @@ from typing import Literal
 
 
 @dataclass
+class Upload:
+    upload_id: str
+    filename: str
+    size: int
+    kind: Literal["video", "photo", "audio"]
+    ext: str
+    chunk_size: int
+    total_chunks: int
+    received: set[int]
+    created_at: float
+
+
+@dataclass
 class FileMeta:
     file_id: str
     kind: Literal["video", "photo", "audio"]

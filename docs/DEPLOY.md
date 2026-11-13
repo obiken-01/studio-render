@@ -46,8 +46,9 @@ no push, no Railway service, no DNS change.
    `STUDIO_QUEUE_MAX` (3). The secret goes into Railway only, never into the repo.
 
 4. **Check what the plan gives you.** After the first deploy, open the service settings and note
-   the RAM and disk. The service needs free disk for the uploaded sources plus the render output,
-   and it refuses new uploads and renders when less than 2 GB is free. Set
+   the RAM and disk. The service needs free disk for the uploaded sources plus the render output.
+   An upload is refused when free space is below that file's own size, and a render fails
+   when less than 2 GB is free at the moment it starts. Set
    `STUDIO_MAX_PROJECT_GB` below the real free disk and `STUDIO_MAX_FILE_GB` below that. If
    renders get killed for memory, lower the limits or move to a larger plan.
 

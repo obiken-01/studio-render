@@ -31,19 +31,53 @@ def _overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
     return a[0] < b[1] - _EPS and b[0] < a[1] - _EPS
 
 
-def _plan_photo_slots(n: int, photos: int, has_videos: bool, rng: random.Random) -> set[int]:
-    """Slot indexes that should show a photo, spread evenly through the timeline."""
+def _photo_groups(
+    slots: list[Slot], photos: int, has_videos: bool, rng: random.Random
+) -> dict[int, int]:
+    """Decide up front which runs of slots show a photo: {first_index: last_index}.
+
+    A photo slot shorter than 1.5 s absorbs the next slot, or the previous one when it is the
+    last slot. Groups never overlap, and slot 0 stays a video when there are videos.
+    """
+    n = len(slots)
     if not photos:
-        return set()
-    if not has_videos:
-        return set(range(n))
-    k = min(photos, n - 1)  # slot 0 always shows a video
-    out: set[int] = set()
+        return {}
+
+    def group(i: int) -> tuple[int, int]:
+        if slots[i].duration >= MIN_PHOTO_SLOT or n == 1:
+            return i, i
+        return (i, i + 1) if i + 1 < n else (i - 1, i)
+
+    groups: dict[int, int] = {}
+    if not has_videos:  # photos fill everything: tile the timeline left to right
+        i = 0
+        while i < n:
+            first, last = group(i)
+            if first < i:  # short final slot: extend the previous photo instead
+                prev = max(groups) if groups else i
+                groups[prev] = n - 1
+                break
+            groups[first] = last
+            i = last + 1
+        return groups
+
+    k = min(photos, n - 1)
+    if k <= 0:
+        return groups
+    claimed: set[int] = set()
     for i in range(k):
         lo = i * (n - 1) // k
         span = (i + 1) * (n - 1) // k - lo
-        out.add(1 + lo + rng.randrange(span))
-    return out
+        target = 1 + lo + rng.randrange(span)
+        for c in [*range(target, n), *range(target - 1, 0, -1)]:
+            first, last = group(c)
+            idxs = set(range(first, last + 1))
+            if first == 0 or idxs & claimed:
+                continue
+            claimed |= idxs
+            groups[first] = last
+            break
+    return groups
 
 
 def fill_slots(
@@ -54,7 +88,7 @@ def fill_slots(
     videos = sorted(videos, key=lambda m: m.file_id)
     photos = sorted(photos, key=lambda m: m.file_id)
     n = len(slots)
-    planned = _plan_photo_slots(n, len(photos), bool(videos), rng)
+    groups = _photo_groups(slots, len(photos), bool(videos), rng)
 
     warnings: dict[str, None] = {}
     clip_uses = {v.file_id: 0 for v in videos}
@@ -67,25 +101,17 @@ def fill_slots(
     while i < n:
         slot = slots[i]
         candidates = [(v, w) for v in videos if (w := _windows(v, slot.duration))]
-        use_photo = i in planned or not candidates
-        if use_photo and not photos:
-            raise ApiError(
-                422, "not_enough_footage",
-                "There is not enough footage to fill every slot. "
-                "Add a longer clip or some photos and try again.",
-                {"slotIndex": i})
-
-        if use_photo:
-            last = i
-            if slot.duration < MIN_PHOTO_SLOT and i + 1 < n:
-                last = i + 1  # a short photo slot absorbs the next slot
-                if last in planned:  # that slot's photo moves to the next free slot
-                    planned.discard(last)
-                    k = last + 1
-                    while k < n and k in planned:
-                        k += 1
-                    if k < n:
-                        planned.add(k)
+        if i in groups or not candidates:
+            if not photos:
+                raise ApiError(
+                    422, "not_enough_footage",
+                    "There is not enough footage to fill every slot. "
+                    "Add a longer clip or some photos and try again.",
+                    {"slotIndex": i})
+            last = groups.get(i, i)
+            if (i not in groups and slot.duration < MIN_PHOTO_SLOT and i + 1 < n
+                    and i + 1 not in groups):
+                last = i + 1  # a stand-in photo for a short slot absorbs the next one
             end = slots[last].start + slots[last].duration
             pool = [p for p in photos if p.file_id != prev_id]
             if not pool:
@@ -109,13 +135,20 @@ def fill_slots(
         if not pool:
             pool = candidates
             warnings["same_clip_back_to_back"] = None
-        low = min(clip_uses[v.file_id] for v, _ in pool)
-        meta, wins = rng.choice([c for c in pool if clip_uses[c[0].file_id] == low])
-        free = [w for w in wins if not any(_overlaps(w, t) for t in clip_taken[meta.file_id])]
-        if not free:
-            free = wins
+        # Prefer clips that still have an unused window; reuse only when none has one.
+        with_free = []
+        for v, w in pool:
+            free = [x for x in w if not any(_overlaps(x, t) for t in clip_taken[v.file_id])]
+            if free:
+                with_free.append((v, free))
+        if with_free:
+            options = with_free
+        else:
+            options = pool
             warnings["shots_repeat"] = None
-        in_sec, out_sec = rng.choice(free)
+        low = min(clip_uses[v.file_id] for v, _ in options)
+        meta, wins = rng.choice([o for o in options if clip_uses[o[0].file_id] == low])
+        in_sec, out_sec = rng.choice(wins)
         clip_taken[meta.file_id].append((in_sec, out_sec))
         clip_uses[meta.file_id] += 1
         segments.append(VideoSegment(
@@ -125,4 +158,6 @@ def fill_slots(
         prev_id = meta.file_id
         i += 1
 
+    if photos and any(c == 0 for c in photo_uses.values()):
+        warnings["photos_left_out"] = None
     return segments, list(warnings)

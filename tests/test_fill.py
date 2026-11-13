@@ -100,6 +100,56 @@ def test_short_photo_slot_merges_next():
     assert sum(s.durationSec for s in segs) == pytest.approx(5.0)
 
 
+def _photo_tail_slots(n):
+    return [Slot(i * 0.5, 0.5) for i in range(n)]
+
+
+@pytest.mark.parametrize("n", [14, 15, 20, 21])
+def test_every_photo_placed_once_including_the_tail(n):
+    slots = _photo_tail_slots(n)
+    photos = [photo(f"p{i}") for i in range(5)]
+    for seed in range(40):
+        segs, w = fill_slots(slots, [vid("a", 30), vid("b", 30)], photos, seed)
+        used = sorted(s.source.fileId for s in segs if s.type == "photo")
+        assert used == [f"p{i}" for i in range(5)] and w == []
+        assert segs[0].type == "video"
+        assert all(s.durationSec >= 1.0 - 1e-6 for s in segs if s.type == "photo")
+        assert sum(s.durationSec for s in segs) == pytest.approx(n * 0.5, abs=1e-3)
+        t = 0.0
+        for s in segs:
+            assert s.slotStartSec == pytest.approx(t, abs=1e-3)
+            t += s.durationSec
+
+
+def test_photo_in_last_slot_merges_previous_video():
+    slots = _photo_tail_slots(4)  # only the last slot (index 3) can host the photo
+    for seed in range(20):
+        segs, _ = fill_slots(slots, [vid("a", 30)], [photo("p")], seed)
+        photos_ = [s for s in segs if s.type == "photo"]
+        assert len(photos_) == 1 and photos_[0].durationSec >= 1.0 - 1e-6
+        assert sum(s.durationSec for s in segs) == pytest.approx(2.0, abs=1e-3)
+
+
+def test_more_photos_than_slots_warns():
+    slots = _photo_tail_slots(3)
+    segs, w = fill_slots(slots, [vid("a", 30)], [photo("p"), photo("q")], seed=1)
+    assert "photos_left_out" in w
+    assert sum(s.durationSec for s in segs) == pytest.approx(1.5, abs=1e-3)
+    segs, w = fill_slots(SLOTS[:2], [], [photo("p"), photo("q"), photo("r")], seed=1)
+    assert "photos_left_out" in w and len(segs) == 1
+
+
+def test_short_clip_is_not_over_picked_while_long_clip_has_windows():
+    slots = [Slot(float(i), 1.0) for i in range(10)]
+    segs, w = fill_slots(slots, [vid("a", 6), vid("b", 30)], [], seed=1)
+    assert "shots_repeat" not in w and "same_clip_back_to_back" not in w
+    taken = {}
+    for s in segs:
+        taken.setdefault(s.source.fileId, []).append((s.source.inSec, s.source.outSec))
+    for wins in taken.values():
+        assert len(set(wins)) == len(wins)
+
+
 def test_photos_only_fill_every_slot_and_warn_on_reuse():
     segs, w = fill_slots(SLOTS, [], [photo("p"), photo("q")], seed=1)
     assert all(s.type == "photo" for s in segs) and "shots_repeat" in w
@@ -160,6 +210,7 @@ def _check_timeline(segs, plan):
     ([("a", 9)], 1),
     ([], 3),
     ([("a", 20), ("tiny", 0.4)], 5),
+    ([("a", 30), ("b", 30)], 12),
 ])
 def test_property_every_draft_is_renderable(pace, mix):
     clips, n_photos = mix

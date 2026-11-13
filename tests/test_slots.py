@@ -33,8 +33,9 @@ def test_start_snaps_to_nearest_beat():
 
 def test_all_uses_whole_song():
     p = build_slots(GRID, None, None, "calm")  # 200 beats, 4 per slot
-    assert p.start_sec == 0.0 and p.end_sec == GRID[-1] and len(p.slots) == 49
-    assert p.slots[-1].duration == pytest.approx(3.5, abs=FRAME)  # 4 beats + 3 spare
+    assert p.start_sec == 0.0 and p.end_sec == GRID[-1] and len(p.slots) == 50
+    assert p.slots[-1].duration == pytest.approx(1.5, abs=FRAME)  # the 3 spare beats
+    assert all(s.duration == pytest.approx(2.0, abs=FRAME) for s in p.slots[:-1])
 
 
 def test_short_song_warns():
@@ -78,3 +79,23 @@ def test_template_longer_than_song():
     with pytest.raises(ApiError) as e:
         slots_from_template(_template([5.0, 5.0]), GRID[:10], None)  # song ends at 4.5 s
     assert e.value.code == "template_too_long"
+
+
+def test_cap_holds_for_every_slot_with_irregular_gaps():
+    gaps = [0.5, 0.5, 0.5, 0.5, 1.4, 0.5, 0.5, 0.5, 1.6, 0.5, 0.5, 0.5] * 12
+    beats = [0.0]
+    for g in gaps:
+        beats.append(round(beats[-1] + g, 3))
+    for pace in ("calm", "medium", "fast"):
+        p = build_slots(beats, None, None, pace)
+        assert all(s.duration <= 5.0 + FRAME for s in p.slots)
+        assert p.end_sec == beats[-1]
+
+
+def test_duplicate_beats_never_make_empty_slots():
+    beats = [0.0, 0.0, 0.5, 0.5, 0.51, 1.0, 1.5, 2.0, 2.0, 2.5, 3.0, 3.0]
+    for pace in ("calm", "medium", "fast"):
+        p = build_slots(beats, None, None, pace)
+        assert all(s.duration > 0 for s in p.slots)
+        assert p.slots[0].start == 0
+        assert sum(s.duration for s in p.slots) == pytest.approx(3.0, abs=FRAME)

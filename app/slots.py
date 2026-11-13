@@ -56,13 +56,27 @@ def build_slots(
         warnings.append("song_shorter_than_length")
 
     per = PER_PACE[pace]
-    while per > 1 and per * interval > MAX_SLOT_SEC:
+    while True:
+        cuts = list(range(i0, i_end, per)) + [i_end]  # spare beats form a shorter last slot
+        if per == 1 or all(beats[b] - beats[a] <= MAX_SLOT_SEC
+                           for a, b in zip(cuts, cuts[1:], strict=False)):
+            break
         per //= 2
 
-    count = max(1, n // per)
-    cuts = [i0 + k * per for k in range(count)] + [i_end]  # last slot absorbs spare beats
-    times = [snap(beats[c] - start) for c in cuts]
-    slots = [Slot(times[k], snap(times[k + 1] - times[k])) for k in range(count)]
+    times = [0.0]
+    for c in cuts[1:]:
+        t = snap(beats[c] - start)
+        if c == i_end:  # the final cut must stay on the last beat
+            while len(times) > 1 and times[-1] >= t:
+                times.pop()
+        if t > times[-1]:
+            times.append(t)
+    if len(times) < 2:
+        raise ApiError(
+            422, "no_beats",
+            "There are not enough beats after the chosen start. "
+            "Pick an earlier start or another track.")
+    slots = [Slot(times[k], snap(times[k + 1] - times[k])) for k in range(len(times) - 1)]
     return SlotPlan(start, beats[i_end], slots, warnings)
 
 

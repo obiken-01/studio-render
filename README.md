@@ -1,8 +1,76 @@
 # studio-render
 
-Private FastAPI service that renders videos for Studio. It accepts uploads, detects beats
-and renders with FFmpeg. Every endpoint except `/health` requires a signed-in Work user on the
-allowlist.
+Private FastAPI service behind **Studio**, the beat-synced video tool at `/work/studio` in the
+tools app (`tools.ralphalcaide.com`). It takes drone and phone clips, photos and one song, and
+returns a finished video cut to the beat, ready for Reels, YouTube or a 4:5 post.
+
+Every endpoint except `/health` requires a signed-in Work user on the allowlist. Nothing is kept:
+uploads and renders live on temp disk and are deleted after export or after a time limit.
+
+## How it works
+
+1. **Upload.** The browser sends each file in 8 MB chunks. An interrupted upload resumes from
+   the chunks the server already has. When the last chunk arrives the file is probed with
+   ffprobe; photos are stored once as upright JPEGs.
+2. **Analyze.** The song is decoded with FFmpeg and librosa finds the beats and tempo.
+3. **Draft.** Beats become slots (calm = 4 beats per shot, medium = 2, fast = 1, never over 5 s).
+   A seeded shuffle fills the slots from the clips and photos: no clip twice in a row, footage
+   spread evenly, and the same seed always gives the same draft. A new seed is a reshuffle.
+4. **Render.** The draft is an **edit list**, a JSON document that is the only thing the renderer
+   reads. Each shot is cut, rotated, cropped to the output shape and encoded at 30 fps; the
+   pieces are then joined and the music is added (or left out for a silent export).
+5. **Download.** The page asks for a link that works for 5 minutes and the browser downloads the
+   mp4 directly.
+
+Outputs are H.264 mp4 at 1080x1920 (9:16), 1920x1080 (16:9) or 1080x1350 (4:5). The original
+clip audio is always dropped. One render runs at a time; up to `STUDIO_QUEUE_MAX` more wait.
+
+## What gets deleted, and when
+
+| What | When |
+| --- | --- |
+| A rendered mp4 | 15 minutes after it has been downloaded, or at the time limit if never downloaded. |
+| Uploaded files and unfinished uploads | `STUDIO_TTL_HOURS` after upload (24 hours by default), or when deleted from the page. |
+| Render intermediates | As soon as the render ends, whether it worked or not. |
+| Everything | On `DELETE /projects/current`, and on any redeploy or restart where the disk is not kept. |
+
+A sweeper runs every 10 minutes, so a timed deletion can happen up to 10 minutes late.
+
+## Security notes
+
+- The service checks the Work login token itself (HS256, same secret as the main API) and then
+  checks the user id against `STUDIO_ALLOWED_USER_IDS`. An empty list means nobody gets in.
+- It holds the main API's signing key, so treat its variables as carefully as the API's.
+- File names from the browser are never used as paths, and FFmpeg is always called with an
+  argument list and may only read local files.
+- The download link is the only route without a login. It is a random token tied to one render
+  and valid for 5 minutes.
+- Run **one** replica with **one** worker. The queue and the file registry are in process
+  memory; a second copy would not see the first one's files or jobs.
+
+## Project layout
+
+```
+app/
+  main.py        app factory, CORS, startup and shutdown, sweeper
+  middleware.py  request body-size limit and last-resort error handling
+  config.py      settings from environment variables
+  auth.py        token check and allowlist
+  errors.py      error envelope and handlers
+  models.py      FileMeta and Upload records
+  storage.py     chunked uploads, file registry, limits, cleanup sweep
+  probe.py       ffprobe and photo inspection
+  beats.py       song decode and beat detection
+  slots.py       beat grid to slots, templates to slots
+  fill.py        seeded fill of slots from clips and photos
+  draft.py       builds the draft edit list
+  editlist.py    edit-list models and validation
+  render/        crop math, FFmpeg runner, per-shot encode, assembly, job queue
+  routes/        HTTP endpoints: session, uploads, projects, renders
+scripts/prodcheck.py   smoke check to run inside the prod image
+tests/           pytest suite; needs FFmpeg, so it runs in the dev image
+docs/DEPLOY.md   how to deploy on Railway
+```
 
 ## Environment variables
 

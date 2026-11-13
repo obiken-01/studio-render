@@ -7,10 +7,24 @@ from app.models import FileMeta
 from tests.media import make_click_track, make_silence
 
 
-def test_click_track_tempo(tmp_path):
-    a = analyze(make_click_track(tmp_path / "c.wav", bpm=120, dur=30))
+@pytest.mark.parametrize("ext", ["wav", "mp3", "m4a"])
+def test_click_track_tempo(tmp_path, ext):
+    a = analyze(make_click_track(tmp_path / f"c.{ext}", bpm=120, dur=30))
     assert abs(a.tempo - 120) <= 2 and len(a.beats) >= 50 and abs(a.duration_sec - 30) < 0.1
     assert all(round(b, 3) == b for b in a.beats)
+
+
+def test_same_file_gives_same_beats(tmp_path):
+    path = make_click_track(tmp_path / "c.m4a", bpm=120, dur=10)
+    assert analyze(path) == analyze(path)
+
+
+def test_garbage_audio_is_unreadable(tmp_path):
+    p = tmp_path / "junk.m4a"
+    p.write_bytes(bytes(range(256)) * 40)
+    with pytest.raises(ApiError) as e:
+        analyze(p)
+    assert e.value.code == "unreadable_file" and e.value.status == 422
 
 
 def test_silence_has_no_beats(tmp_path):  # Review Focus 2

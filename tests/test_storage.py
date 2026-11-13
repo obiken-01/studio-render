@@ -9,7 +9,7 @@ from pillow_heif import register_heif_opener
 
 from app.errors import ApiError
 from app.storage import CHUNK_SIZE, Store
-from tests.media import make_photo, make_silence, make_video
+from tests.media import make_click_track, make_photo, make_silence, make_video
 
 MB = 1024 * 1024
 
@@ -172,6 +172,30 @@ def test_audio_only_mp4_as_video_is_rejected_and_removed(store, tmp_path):
     left = [p.name for p in store.data_dir.rglob("*") if p.is_file() and p.name != "state.json"]
     assert left == []
     assert store.files() == {}
+
+
+@pytest.mark.parametrize("ext", ["wav", "mp3", "m4a"])
+def test_song_formats_upload(store, tmp_path, ext):
+    song = make_click_track(tmp_path / f"s.{ext}", bpm=120, dur=3)
+    meta = store.complete_upload(_upload_all(store, song, f"s.{ext}", "audio").upload_id)
+    assert meta.duration_sec == pytest.approx(3.0, abs=0.1)
+
+
+def test_song_over_limit_is_rejected_at_upload(store, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.storage.MAX_AUDIO_SEC", 5)
+    song = make_silence(tmp_path / "long.m4a", dur=8)
+    up = _upload_all(store, song, "long.m4a", "audio")
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert (e.value.status, e.value.code) == (422, "audio_too_long")
+    assert e.value.message == "This song is too long. Use a track under 15 minutes."
+    assert store.files() == {}
+    assert list(store.files_dir.iterdir()) == []
+
+
+def test_song_limit_is_fifteen_minutes():
+    from app.storage import MAX_AUDIO_SEC
+    assert MAX_AUDIO_SEC == 15 * 60
 
 
 def test_heic_photo_becomes_jpeg(store, tmp_path):

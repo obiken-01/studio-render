@@ -17,6 +17,7 @@ from app.models import FileMeta, Upload
 from app.probe import probe_media
 
 CHUNK_SIZE = 8 * 1024 * 1024
+MAX_AUDIO_SEC = 15 * 60
 
 ALLOWED_EXTENSIONS = {
     "video": {"mp4", "mov"},
@@ -219,6 +220,9 @@ class Store:
             if up.ext in _HEIC:
                 final = self._heic_to_jpeg(final)
             info = probe_media(final, up.kind)
+            if up.kind == "audio" and info["duration_sec"] > MAX_AUDIO_SEC:
+                raise ApiError(422, "audio_too_long",
+                               "This song is too long. Use a track under 15 minutes.")
             meta = FileMeta(
                 file_id=up.upload_id, kind=up.kind, path=final, filename=up.filename,
                 size=final.stat().st_size, duration_sec=info["duration_sec"],

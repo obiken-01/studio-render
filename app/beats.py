@@ -1,3 +1,5 @@
+import logging
+import subprocess
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -6,7 +8,11 @@ from pathlib import Path
 from app.errors import ApiError
 from app.models import FileMeta
 
+logger = logging.getLogger(__name__)
+
 MIN_BEATS = 4
+SAMPLE_RATE = 22050
+DECODE_TIMEOUT_SEC = 300
 _CACHE_SIZE = 8
 
 
@@ -24,17 +30,43 @@ def _tempo(beats: list[float], fallback: float) -> float:
     return round(60.0 * (len(beats) - 1) / span, 2) if span > 0 else fallback
 
 
+def _unreadable() -> ApiError:
+    return ApiError(
+        422, "unreadable_file", "This file can't be read as a video, photo or audio file.")
+
+
+def _decode(path: Path):
+    """Decode any supported song (wav, mp3, m4a/AAC) to mono float32 at SAMPLE_RATE through
+    ffmpeg. libsndfile alone cannot read AAC, so librosa.load is not used."""
+    import numpy as np
+
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-vn", "-ac", "1",
+             "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
+            capture_output=True, timeout=DECODE_TIMEOUT_SEC, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.exception("ffmpeg could not decode the song")
+        raise _unreadable() from None
+    if proc.returncode != 0:
+        logger.warning("ffmpeg could not decode the song: %s",
+                       proc.stderr[-500:].decode("utf-8", errors="replace"))
+        raise _unreadable()
+    usable = len(proc.stdout) - len(proc.stdout) % 4
+    y = np.frombuffer(proc.stdout[:usable], dtype=np.float32)
+    if y.size == 0 or not np.all(np.isfinite(y)):
+        raise _unreadable()
+    return y
+
+
 def analyze(path: Path) -> BeatAnalysis:
     # librosa is slow to import, so it is loaded only when a song is actually analysed.
     import librosa
     import numpy as np
 
-    try:
-        y, sr = librosa.load(str(path), sr=22050, mono=True)
-    except Exception:
-        raise ApiError(
-            422, "unreadable_file",
-            "This file can't be read as a video, photo or audio file.") from None
+    y = _decode(Path(path))
+    sr = SAMPLE_RATE
     tempo, times = librosa.beat.beat_track(y=y, sr=sr, units="time")
     beats = [round(float(b), 3) for b in np.atleast_1d(times)]
     if len(beats) < MIN_BEATS:

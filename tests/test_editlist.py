@@ -155,3 +155,21 @@ def test_file_meta_public():
     assert pub["fileId"] == "v1" and pub["durationSec"] == 20.0
     assert set(pub) == {"fileId", "kind", "filename", "size", "durationSec",
                         "width", "height", "fps", "rotation"}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("mutate", [
+    lambda d, v: d["music"].update(endSec=v),
+    lambda d, v: d["music"].update(startSec=v),
+    lambda d, v: d["timeline"][0]["source"].update(inSec=v),
+    lambda d, v: d["timeline"][0]["source"].update(outSec=v),
+    lambda d, v: d["timeline"][0].update(durationSec=v),
+    lambda d, v: d["timeline"][0].update(slotStartSec=v),
+    lambda d, v: d["timeline"][0].update(crop={"focusX": v, "focusY": 0.5}),
+    lambda d, v: d["music"].update(beats=[v]),
+])
+def test_non_finite_numbers_rejected(mutate, bad):
+    d = good()
+    mutate(d, bad)
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)

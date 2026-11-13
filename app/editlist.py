@@ -19,7 +19,7 @@ def snap(t: float) -> float:
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class Project(_Strict):

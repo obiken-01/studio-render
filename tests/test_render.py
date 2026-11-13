@@ -190,3 +190,23 @@ def test_empty_segment_is_a_render_error(tmp_path, files):
     with pytest.raises(RenderError) as e:
         run(tmp_path, files, d)
     assert str(e.value) == "The video could not be rendered."
+
+
+def test_missing_workdir_does_not_mask_the_render_error(tmp_path, files):
+    d = el_dict("9:16", "silent", [vseg(0.0, 1.0, 0.0)], 1.0)
+    with pytest.raises(RenderError) as e:
+        render_edit_list(EditList.model_validate(d), files, tmp_path / "out.mp4",
+                         tmp_path / "gone", lambda f: None, threading.Event(), 0)
+    assert str(e.value) == "The render took too long."
+
+
+def test_failed_render_leaves_no_output(tmp_path, files):
+    out = tmp_path / "out.mp4"
+    out.write_bytes(b"half written")
+    cancel = threading.Event()
+    cancel.set()
+    d = el_dict("9:16", "silent", [vseg(0.0, 1.0, 0.0)], 1.0)
+    with pytest.raises(RenderError):
+        render_edit_list(EditList.model_validate(d), files, out, tmp_path / "work",
+                         lambda f: None, cancel, 300.0)
+    assert not out.exists()

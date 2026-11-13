@@ -19,7 +19,12 @@ FAILED = "The video could not be rendered."
 
 
 def _clear(workdir: Path) -> None:
-    for child in workdir.iterdir():
+    """Empty `workdir`. A missing workdir is fine (it must not mask the real error)."""
+    try:
+        children = list(workdir.iterdir())
+    except FileNotFoundError:
+        return
+    for child in children:
         if child.is_dir() and not child.is_symlink():
             shutil.rmtree(child, ignore_errors=True)
         else:
@@ -56,8 +61,10 @@ def render_edit_list(el: EditList, files: Mapping[str, FileMeta], out_path: Path
         _render(el, files, Path(out_path), workdir, report, cancel, deadline)
         report(1.0)
     except RenderError:
+        Path(out_path).unlink(missing_ok=True)
         raise
     except Exception:
+        Path(out_path).unlink(missing_ok=True)
         logger.exception("unexpected render failure")
         raise RenderError(FAILED) from None
     finally:

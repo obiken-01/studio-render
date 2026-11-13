@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.config import Settings, get_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.render.worker import RenderQueue, get_queue  # noqa: E402
 from app.storage import Store, get_store  # noqa: E402
 
 
@@ -38,10 +39,19 @@ def store(settings):
 
 
 @pytest.fixture
-def client(settings, store):
+def queue(settings, store):
+    q = RenderQueue(store, settings)
+    q.start()
+    yield q
+    q.stop()
+
+
+@pytest.fixture
+def client(settings, store, queue):
     app = create_app(settings)
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_store] = lambda: store
+    app.dependency_overrides[get_queue] = lambda: queue
     return TestClient(app)
 
 

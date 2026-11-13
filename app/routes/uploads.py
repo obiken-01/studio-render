@@ -4,6 +4,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.auth import require_user
 from app.errors import ApiError, ok
+from app.render.worker import RenderQueue, get_queue
 from app.storage import Store, get_store
 
 router = APIRouter(dependencies=[Depends(require_user)])
@@ -57,6 +58,7 @@ def delete_file(file_id: str, store: Store = Depends(get_store)):
 
 
 @router.delete("/projects/current")
-def clear_project(store: Store = Depends(get_store)):
+def clear_project(store: Store = Depends(get_store), queue: RenderQueue = Depends(get_queue)):
+    queue.clear()
     store.clear()
     return ok(None)

@@ -1,14 +1,24 @@
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from app.editlist import ASPECTS, EditList
 from app.models import FileMeta
 from app.probe import probe_media
+from app.render import assemble as assemble_mod
+from app.render import pipeline as pipeline_mod
 from app.render.ffmpeg import RenderError
 from app.render.pipeline import render_edit_list
-from tests.media import ffprobe_json, make_click_track, make_photo, make_video
+from app.render.segments import video_args
+from tests.media import (
+    ffprobe_json,
+    make_click_track,
+    make_photo,
+    make_video,
+    make_video_with_cover,
+)
 
 KINDS = {"video": "video", "video24": "video", "video60": "video", "rotated": "video",
          "photo": "photo", "music": "audio"}
@@ -198,6 +208,69 @@ def test_missing_workdir_does_not_mask_the_render_error(tmp_path, files):
         render_edit_list(EditList.model_validate(d), files, tmp_path / "out.mp4",
                          tmp_path / "gone", lambda f: None, threading.Event(), 0)
     assert str(e.value) == "The render took too long."
+
+
+def _inputs_are_restricted(args):
+    """Every `-i` must have the protocol whitelist among the options since the last input."""
+    last = 0
+    for i, a in enumerate(args):
+        if a == "-i":
+            opts = args[last:i]
+            assert "-protocol_whitelist" in opts, args
+            assert opts[opts.index("-protocol_whitelist") + 1] == "file,pipe"
+            last = i + 2
+    return args.count("-i")
+
+
+@pytest.mark.parametrize("crossfade", [False, True])
+def test_every_ffmpeg_input_is_restricted(tmp_path, files, monkeypatch, crossfade):
+    calls = []
+
+    def fake_run(args, *a, **kw):
+        calls.append(args)
+        if "-frames:v" in args:
+            Path(args[-1]).write_bytes(b"x")
+
+    monkeypatch.setattr(pipeline_mod, "run_ffmpeg", fake_run)
+    monkeypatch.setattr(assemble_mod, "run_ffmpeg", fake_run)
+    d = el_dict("9:16", "music", [
+        vseg(0.0, 1.0, 0.0, transition="crossfade" if crossfade else "cut"),
+        pseg(1.0, 1.0),
+    ], 2.0)
+    run(tmp_path, files, d)
+    assert len(calls) == 3
+    assert [_inputs_are_restricted(c) for c in calls] == [1, 1, 3 if crossfade else 2]
+
+
+def test_beat_decode_restricts_protocols(files, monkeypatch):
+    import subprocess
+
+    from app import beats as beats_mod
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(beats_mod.subprocess, "run",
+                        lambda args, **kw: seen.append(args) or real(args, **kw))
+    beats_mod.analyze(files["music"].path)
+    assert _inputs_are_restricted(seen[0]) == 1
+
+
+def test_stage_one_maps_the_probed_video_stream(files, tmp_path):
+    seg = EditList.model_validate(
+        el_dict("9:16", "silent", [vseg(0.0, 1.0, 0.0)], 1.0)).timeline[0]
+    args = video_args(seg, files["video"], 1080, 1920, tmp_path / "o.mp4")
+    i = args.index("-map")
+    assert args[i + 1] == "0:V:0" and i > args.index("-i")
+
+
+def test_clip_with_cover_art_renders_the_real_video(tmp_path, files):
+    p = make_video_with_cover(tmp_path / "cover.mp4", 320, 240, 2.0)
+    r = probe_media(p, "video")
+    clip = FileMeta("cover", "video", p, p.name, p.stat().st_size, r["duration_sec"],
+                    r["width"], r["height"], r["fps"], r["rotation"], 0.0)
+    d = el_dict("16:9", "silent", [vseg(0.0, 1.0, 0.0, file_id="cover")], 1.0)
+    v = streams(render(tmp_path, {**files, "cover": clip}, d), "video")
+    assert len(v) == 1 and (v[0]["width"], v[0]["height"]) == (1920, 1080)
+    assert int(v[0]["nb_frames"]) == 30
 
 
 def test_failed_render_leaves_no_output(tmp_path, files):

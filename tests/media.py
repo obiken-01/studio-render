@@ -27,6 +27,19 @@ def make_video(path: Path, w: int = 1920, h: int = 1080, dur: float = 6.0, fps: 
     return path
 
 
+def make_video_with_cover(path: Path, w: int = 320, h: int = 240, dur: float = 2.0) -> Path:
+    """An mp4 that also carries a 64x64 cover picture (an attached-picture video stream)."""
+    path = Path(path)
+    clip = make_video(path.with_name(path.stem + "_clip.mp4"), w, h, dur)
+    cover = path.with_name(path.stem + "_cover.jpg")
+    Image.new("RGB", (64, 64), (255, 0, 0)).save(cover, "JPEG")
+    _run(["-i", str(cover), "-i", str(clip), "-map", "0", "-map", "1", "-c", "copy",
+          "-disposition:0", "attached_pic", str(path)])
+    clip.unlink()
+    cover.unlink()
+    return path
+
+
 def make_photo(path: Path, w: int = 4000, h: int = 3000, exif_orientation: int = 1) -> Path:
     path = Path(path)
     img = Image.new("RGB", (w, h), (30, 90, 160))

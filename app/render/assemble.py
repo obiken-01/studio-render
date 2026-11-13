@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.editlist import FPS, XFADE_FRAMES, XFADE_SEC, EditList
 from app.models import FileMeta
-from app.render.ffmpeg import run_ffmpeg
+from app.render.ffmpeg import INPUT_PROTOCOLS, run_ffmpeg
 
 _TB = "1/15360"
 
@@ -50,15 +50,16 @@ def assemble(el: EditList, parts: list[Path], frames: list[int], music: FileMeta
     args: list[str] = []
     if crossfades:
         for p in parts:
-            args += ["-i", str(p)]
+            args += [*INPUT_PROTOCOLS, "-i", str(p)]
     else:
         list_path = workdir / "concat.txt"
         _concat_list(parts, list_path)
-        args += ["-f", "concat", "-safe", "0", "-i", str(list_path)]
+        args += [*INPUT_PROTOCOLS, "-f", "concat", "-safe", "0", "-i", str(list_path)]
 
     if music is not None:
         dur = el.music.endSec - el.music.startSec
-        args += ["-ss", f"{el.music.startSec:.6f}", "-t", f"{dur:.6f}", "-i", str(music.path)]
+        args += [*INPUT_PROTOCOLS, "-ss", f"{el.music.startSec:.6f}", "-t", f"{dur:.6f}",
+                 "-i", str(music.path)]
 
     if crossfades:
         graph, label = _filter_graph(el, frames)

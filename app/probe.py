@@ -9,6 +9,7 @@ from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
 from app.errors import ApiError
+from app.render.ffmpeg import INPUT_PROTOCOLS
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,8 @@ def _unreadable() -> ApiError:
 def _ffprobe(path: Path) -> dict:
     try:
         proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams",
-             str(path)],
+            ["ffprobe", "-v", "error", *INPUT_PROTOCOLS, "-print_format", "json",
+             "-show_format", "-show_streams", str(path)],
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -136,7 +137,11 @@ def probe_media(path: Path, kind: str) -> dict:
 
     info = _ffprobe(path)
     wanted = "video" if kind == "video" else "audio"
-    stream = next((s for s in info.get("streams", []) if s.get("codec_type") == wanted), None)
+    # Skip cover pictures: the renderer maps `0:V:0`, the first video stream that is not an
+    # attached picture, so both must pick the same stream.
+    stream = next((s for s in info.get("streams", [])
+                   if s.get("codec_type") == wanted
+                   and not (s.get("disposition") or {}).get("attached_pic")), None)
     if stream is None:
         raise _unreadable()
     duration = _duration(info, stream)

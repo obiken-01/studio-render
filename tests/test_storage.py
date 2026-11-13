@@ -194,6 +194,17 @@ def test_song_over_limit_is_rejected_at_upload(store, tmp_path, monkeypatch):
     assert list(store.files_dir.iterdir()) == []
 
 
+def test_playlist_uploaded_as_mp4_is_unreadable(store, tmp_path):
+    p = tmp_path / "x.mp4"
+    p.write_text("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n/etc/passwd\n"
+                 "#EXT-X-ENDLIST\n")
+    up = _upload_all(store, p, "x.mp4", "video")
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "unreadable_file"
+    assert store.files() == {} and list(store.files_dir.iterdir()) == []
+
+
 def test_song_limit_is_fifteen_minutes():
     from app.storage import MAX_AUDIO_SEC
     assert MAX_AUDIO_SEC == 15 * 60

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.errors import ApiError
 from app.models import FileMeta
+from app.render.ffmpeg import INPUT_PROTOCOLS
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,8 @@ def _decode(path: Path):
 
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-vn", "-ac", "1",
-             "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
+            ["ffmpeg", "-v", "error", "-nostdin", *INPUT_PROTOCOLS, "-i", str(path),
+             "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
             capture_output=True, timeout=DECODE_TIMEOUT_SEC, stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired):

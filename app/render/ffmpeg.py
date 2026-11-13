@@ -7,6 +7,12 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
+# Put before every `-i` (and ffprobe's input) that reads an uploaded file or a list of our own
+# files. ffmpeg opens inputs by content, so a crafted file must never make it reach a URL or
+# another protocol; only local files and pipes are allowed. The concat demuxer's list needs
+# nothing more.
+INPUT_PROTOCOLS = ["-protocol_whitelist", "file,pipe"]
+
 
 class RenderError(Exception):
     """A render failed. The message is safe to show to the user."""

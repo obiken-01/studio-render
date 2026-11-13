@@ -10,12 +10,11 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from fastapi import Depends
-from PIL import Image, ImageOps
 
 from app.config import Settings, get_settings
 from app.errors import ApiError
 from app.models import FileMeta, Upload
-from app.probe import probe_media
+from app.probe import normalise_photo, probe_media
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,6 @@ ALLOWED_EXTENSIONS = {
     "photo": {"jpg", "jpeg", "png", "heic", "heif"},
     "audio": {"mp3", "m4a", "wav"},
 }
-_HEIC = {"heic", "heif"}
 _GB = 1024**3
 
 
@@ -230,11 +228,20 @@ class Store:
             self._save()
         part = self._part_path(up)
         final = self.files_dir / f"{up.upload_id}.{up.ext}"
+        normalised = self.files_dir / f"{up.upload_id}.normalised.jpg"
         try:
             os.replace(part, final)
-            if up.ext in _HEIC:
-                final = self._heic_to_jpeg(final)
-            info = probe_media(final, up.kind)
+            if up.kind == "photo":
+                # Every photo is stored once as an upright RGB JPEG (long side <= 4320 px),
+                # so neither the probe nor the renderer ever decodes the original again.
+                width, height = normalise_photo(final, normalised)
+                final.unlink()
+                final = self.files_dir / f"{up.upload_id}.jpg"
+                os.replace(normalised, final)
+                info = {"duration_sec": None, "width": width, "height": height, "fps": None,
+                        "rotation": 0}
+            else:
+                info = probe_media(final, up.kind)
             if up.kind == "audio" and info["duration_sec"] > MAX_AUDIO_SEC:
                 raise ApiError(422, "audio_too_long",
                                "This song is too long. Use a track under 15 minutes.")
@@ -244,7 +251,7 @@ class Store:
                 width=info["width"], height=info["height"], fps=info["fps"],
                 rotation=info["rotation"], created_at=time.time())
         except BaseException:
-            for p in (part, final, self.files_dir / f"{up.upload_id}.jpg",
+            for p in (part, final, normalised, self.files_dir / f"{up.upload_id}.jpg",
                       self.files_dir / f"{up.upload_id}.{up.ext}"):
                 self._unlink(p)
             raise
@@ -252,21 +259,6 @@ class Store:
             self._files[meta.file_id] = meta
             self._save()
         return meta
-
-    @staticmethod
-    def _heic_to_jpeg(src: Path) -> Path:
-        dest = src.with_suffix(".jpg")
-        try:
-            with Image.open(src) as img:
-                img = ImageOps.exif_transpose(img).convert("RGB")
-                img.save(dest, "JPEG", quality=95)
-        except Exception:
-            dest.unlink(missing_ok=True)
-            raise ApiError(
-                422, "unreadable_file",
-                "This file can't be read as a video, photo or audio file.") from None
-        src.unlink()
-        return dest
 
     # ---- files ----
 

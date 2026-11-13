@@ -12,8 +12,15 @@ from app.errors import ApiError
 
 logger = logging.getLogger(__name__)
 
-# Lets Pillow (probe, upload conversion and the renderer's photo path) open HEIC/HEIF.
+# Lets Pillow (probe and upload normalisation) open HEIC/HEIF.
 register_heif_opener()
+
+# Pillow refuses images over twice this many pixels (DecompressionBombError) and warns above
+# it; normalise_photo rejects anything above it.
+Image.MAX_IMAGE_PIXELS = 200_000_000
+PHOTO_LONG_SIDE = 4320
+PHOTO_QUALITY = 92
+_ORIENTATION = 0x0112
 
 
 def _unreadable() -> ApiError:
@@ -78,16 +85,47 @@ def _duration(info: dict, stream: dict) -> float:
 
 
 def _probe_photo(path: Path) -> dict:
+    """Display size from the header and EXIF orientation alone, without decoding pixels."""
     try:
         with Image.open(path) as img:
-            img = ImageOps.exif_transpose(img)
             w, h = img.size
+            if img.getexif().get(_ORIENTATION, 1) in (5, 6, 7, 8):
+                w, h = h, w
     except Exception:  # Pillow raises many types for broken files
         logger.warning("Pillow could not open %s", path.name, exc_info=True)
         raise _unreadable() from None
     if w <= 0 or h <= 0:
         raise _unreadable()
     return {"duration_sec": None, "width": w, "height": h, "fps": None, "rotation": 0}
+
+
+def normalise_photo(src: Path, dest: Path) -> tuple[int, int]:
+    """Write `src` to `dest` as an upright RGB JPEG whose long side is at most
+    PHOTO_LONG_SIDE (never upscaled), with no EXIF orientation left to apply. Covers JPEG,
+    PNG and HEIC alike. Returns the stored (width, height)."""
+    try:
+        with Image.open(src) as img:
+            w, h = img.size
+            if w <= 0 or h <= 0 or w * h > Image.MAX_IMAGE_PIXELS:
+                raise _unreadable()
+            if img.format == "JPEG" and max(w, h) > PHOTO_LONG_SIDE:
+                # Let libjpeg decode at 1/2, 1/4 or 1/8 scale, never below the target size.
+                f = PHOTO_LONG_SIDE / max(w, h)
+                img.draft("RGB", (math.ceil(w * f), math.ceil(h * f)))
+            upright = ImageOps.exif_transpose(img)
+            if upright.mode != "RGB":
+                upright = upright.convert("RGB")
+            upright.thumbnail((PHOTO_LONG_SIDE, PHOTO_LONG_SIDE), Image.Resampling.LANCZOS)
+            upright.save(dest, "JPEG", quality=PHOTO_QUALITY)
+            size = upright.size
+    except ApiError:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception:  # Pillow raises many types for broken or hostile files
+        logger.warning("Pillow could not normalise %s", src.name, exc_info=True)
+        dest.unlink(missing_ok=True)
+        raise _unreadable() from None
+    return size
 
 
 def probe_media(path: Path, kind: str) -> dict:

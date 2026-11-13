@@ -5,8 +5,6 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
-from PIL import Image, ImageOps
-
 from app.editlist import FPS, EditList
 from app.models import FileMeta
 from app.render.assemble import assemble
@@ -29,19 +27,6 @@ def _clear(workdir: Path) -> None:
             shutil.rmtree(child, ignore_errors=True)
         else:
             child.unlink(missing_ok=True)
-
-
-def _upright_photo(meta: FileMeta, workdir: Path, name: str) -> tuple[Path, int, int]:
-    """Write an EXIF-corrected RGB JPEG that ffmpeg can read (also covers HEIC etc.)."""
-    out = workdir / name
-    try:
-        with Image.open(meta.path) as img:
-            img = ImageOps.exif_transpose(img).convert("RGB")
-            img.save(out, "JPEG", quality=95)
-            return out, img.width, img.height
-    except Exception:
-        logger.exception("could not prepare photo %s", meta.file_id)
-        raise RenderError(FAILED) from None
 
 
 def render_edit_list(el: EditList, files: Mapping[str, FileMeta], out_path: Path, workdir: Path,
@@ -79,17 +64,14 @@ def _render(el, files, out_path, workdir, report, cancel, deadline) -> None:
 
     parts: list[Path] = []
     frames: list[int] = []
-    photos: dict[str, tuple[Path, int, int]] = {}
     for i, seg in enumerate(el.timeline):
         part = workdir / f"seg_{i:03d}.mp4"
         meta = files[seg.source.fileId]
         if seg.type == "video":
             args = video_args(seg, meta, out_w, out_h, part)
         else:
-            if meta.file_id not in photos:
-                photos[meta.file_id] = _upright_photo(meta, workdir, f"photo_{len(photos)}.jpg")
-            image, iw, ih = photos[meta.file_id]
-            args = photo_args(seg, image, iw, ih, out_w, out_h, part)
+            # Photos are stored as upright RGB JPEGs at upload, so ffmpeg reads them directly.
+            args = photo_args(seg, meta.path, meta.width, meta.height, out_w, out_h, part)
         nframes = segment_frames(seg)
         run_ffmpeg(args, nframes / FPS,
                    lambda f, i=i: report(0.9 * (i + f) / n), cancel, deadline)

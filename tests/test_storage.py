@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from PIL import Image
+from PIL import Image, JpegImagePlugin
 from pillow_heif import register_heif_opener
 
 from app.errors import ApiError
@@ -217,6 +217,81 @@ def test_plain_photo_keeps_extension(store, tmp_path):
     meta = store.complete_upload(_upload_all(store, photo, "p.JPG", "photo").upload_id)
     assert meta.path.suffix == ".jpg"
     assert meta.public()["width"] == 400
+
+
+def _only_files(store):
+    return sorted(p.name for p in store.files_dir.iterdir())
+
+
+def test_big_rotated_photo_is_stored_upright_and_downscaled(store, tmp_path):
+    photo = make_photo(tmp_path / "big.jpg", w=6000, h=4000, exif_orientation=6)
+    meta = store.complete_upload(_upload_all(store, photo, "big.jpg", "photo").upload_id)
+    assert (meta.width, meta.height) == (2880, 4320)
+    assert meta.size == meta.path.stat().st_size
+    assert _only_files(store) == [meta.path.name]
+    with Image.open(meta.path) as img:
+        assert img.format == "JPEG" and img.mode == "RGB"
+        assert img.size == (2880, 4320)
+        assert img.getexif().get(0x0112, 1) == 1
+        # The red block drawn top-left on the sensor is top-right once turned upright.
+        r, g, b = img.getpixel((int(2880 * 0.9), int(4320 * 0.1)))
+        assert r > 150 and g < 120 and b < 120
+        r, g, b = img.getpixel((int(2880 * 0.1), int(4320 * 0.1)))
+        assert b > 120 and r < 100
+
+
+def test_very_big_jpeg_is_decoded_reduced_and_downscaled(store, tmp_path, monkeypatch):
+    seen = []
+    real_draft = JpegImagePlugin.JpegImageFile.draft
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft",
+                        lambda self, mode, size: seen.append(size) or real_draft(self, mode, size))
+    photo = make_photo(tmp_path / "huge.jpg", w=9000, h=6000)
+    meta = store.complete_upload(_upload_all(store, photo, "huge.jpg", "photo").upload_id)
+    assert seen == [(4320, 2880)]
+    assert (meta.width, meta.height) == (4320, 2880)
+
+
+def test_small_photo_is_not_upscaled(store, tmp_path):
+    photo = make_photo(tmp_path / "small.jpg", w=400, h=300, exif_orientation=8)
+    meta = store.complete_upload(_upload_all(store, photo, "small.jpg", "photo").upload_id)
+    assert (meta.width, meta.height) == (300, 400)
+    with Image.open(meta.path) as img:
+        assert img.size == (300, 400)
+
+
+def test_png_photo_becomes_jpeg(store, tmp_path):
+    png = tmp_path / "shot.png"
+    Image.new("RGBA", (5000, 1000), (10, 120, 200, 128)).save(png)
+    meta = store.complete_upload(_upload_all(store, png, "shot.png", "photo").upload_id)
+    assert meta.path.suffix == ".jpg" and (meta.width, meta.height) == (4320, 864)
+    assert _only_files(store) == [meta.path.name]
+    with Image.open(meta.path) as img:
+        assert img.format == "JPEG" and img.mode == "RGB"
+
+
+def test_decompression_bomb_is_unreadable(store, tmp_path, monkeypatch):
+    photo = make_photo(tmp_path / "p.jpg", w=400, h=300)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)  # 120000 px is far past 2x the limit
+    up = _upload_all(store, photo, "p.jpg", "photo")
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "unreadable_file"
+    assert _only_files(store) == [] and store.files() == {}
+
+
+def test_photo_just_over_the_pixel_limit_is_unreadable(store, tmp_path, monkeypatch):
+    photo = make_photo(tmp_path / "p.jpg", w=400, h=300)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100_000)  # over the limit, under 2x
+    up = _upload_all(store, photo, "p.jpg", "photo")
+    with pytest.warns(Image.DecompressionBombWarning), pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "unreadable_file"
+    assert _only_files(store) == []
+
+
+def test_pixel_limit_is_sane():
+    import app.probe  # noqa: F401  (sets the limit)
+    assert Image.MAX_IMAGE_PIXELS == 200_000_000
 
 
 def test_sweep_removes_expired(store, tmp_path):

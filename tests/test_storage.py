@@ -1,4 +1,6 @@
 import hashlib
+import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -247,3 +249,73 @@ def test_delete_file_and_clear(store, tmp_path):
     store.clear()
     assert store.files() == {} and store.total_bytes() == 0
     assert not any(store.files_dir.iterdir()) and not any(store.uploads_dir.iterdir())
+
+
+def test_oversized_last_chunk_never_grows_the_file(settings):
+    store = _small_store(settings, chunk_size=100)
+    up = store.create_upload("clip.mp4", 250, "video")  # chunks of 100, 100, 50
+    part = next(store.uploads_dir.iterdir())
+    with pytest.raises(ApiError) as e:
+        store.write_chunk(up.upload_id, 2, [b"x" * 100])
+    assert e.value.code == "bad_chunk"
+    assert part.stat().st_size == 250
+    assert 2 not in store.get_upload(up.upload_id).received
+    with pytest.raises(ApiError) as e:
+        store.write_chunk(up.upload_id, 0, [b"x" * 101])
+    assert e.value.code == "chunk_too_large"
+    assert part.stat().st_size == 250
+
+
+def test_failed_resend_unmarks_chunk_and_good_resend_completes(settings, tmp_path):
+    original = make_video(tmp_path / "src.mp4", w=640, h=360, dur=2)
+    data = original.read_bytes()
+    store = _small_store(settings, chunk_size=-(-len(data) // 2))
+    up = store.create_upload("clip.mp4", len(data), "video")
+    cs = up.chunk_size
+    chunks = [data[:cs], data[cs:]]
+    for n in (0, 1):
+        store.write_chunk(up.upload_id, n, [chunks[n]])
+    with pytest.raises(ApiError):
+        store.write_chunk(up.upload_id, 0, [b"garbage"])
+    assert store.get_upload(up.upload_id).received == {1}
+    with pytest.raises(ApiError) as e:
+        store.complete_upload(up.upload_id)
+    assert e.value.code == "upload_incomplete" and e.value.details == {"missing": [0]}
+    store.write_chunk(up.upload_id, 0, [chunks[0]])
+    meta = store.complete_upload(up.upload_id)
+    assert _sha(meta.path) == _sha(original)
+
+
+def _age(path, seconds):
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+def test_sweep_deletes_old_orphans_but_keeps_young_and_registered(store, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    meta = store.complete_upload(_upload_all(store, clip, "c.mp4", "video").upload_id)
+    pending = store.create_upload("p.mp4", 10, "video")
+    old = store.files_dir / "up_old.mp4"
+    old_part = store.uploads_dir / "up_oldpart.mp4.part"
+    young = store.files_dir / "up_young.mp4"
+    for p in (old, old_part, young):
+        p.write_bytes(b"x")
+    _age(old, 25 * 3600)
+    _age(old_part, 25 * 3600)
+    assert store.sweep(time.time()) == 2
+    assert not old.exists() and not old_part.exists()
+    assert young.exists() and meta.path.exists()
+    assert (store.data_dir / "state.json").exists()
+    assert store.get_upload(pending.upload_id)
+
+
+def test_corrupt_state_then_sweep_removes_old_files(store, settings, tmp_path):
+    clip = make_video(tmp_path / "c.mp4", w=320, h=240, dur=1)
+    meta = store.complete_upload(_upload_all(store, clip, "c.mp4", "video").upload_id)
+    (settings.studio_data_dir / "state.json").write_text("{not json")
+    again = _small_store(settings)
+    assert again.files() == {}
+    assert meta.path.exists()
+    assert again.sweep(time.time() + 24 * 3600 + 1) == 1
+    assert not meta.path.exists()
+    assert (settings.studio_data_dir / "state.json").exists()

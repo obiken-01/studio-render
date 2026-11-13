@@ -166,9 +166,14 @@ class Store:
         return up
 
     def write_chunk(self, upload_id: str, n: int, data: Iterable[bytes]) -> Upload:
-        up = self.get_upload(upload_id)
-        if not 0 <= n < up.total_chunks:
-            raise ApiError(400, "bad_chunk", "That part of the file does not belong here.")
+        with self._lock:
+            up = self._get_upload(upload_id)
+            if not 0 <= n < up.total_chunks:
+                raise ApiError(400, "bad_chunk", "That part of the file does not belong here.")
+            # A resend overwrites the region, so it is not trustworthy until it fully lands.
+            if n in up.received:
+                up.received.discard(n)
+                self._save()
         offset = n * up.chunk_size
         expected = min(up.chunk_size, up.size - offset)
         written = 0
@@ -176,11 +181,14 @@ class Store:
             with open(self._part_path(up), "r+b") as fh:
                 fh.seek(offset)
                 for piece in data:
-                    written += len(piece)
-                    if written > up.chunk_size:
-                        raise ApiError(413, "chunk_too_large",
-                                       "That part of the file is too big to upload at once.")
+                    if written + len(piece) > expected:
+                        if written + len(piece) > up.chunk_size:
+                            raise ApiError(413, "chunk_too_large",
+                                           "That part of the file is too big to upload at once.")
+                        raise ApiError(400, "bad_chunk",
+                                       "That part of the file arrived with the wrong size.")
                     fh.write(piece)
+                    written += len(piece)
         except FileNotFoundError:
             raise _unknown_upload() from None
         except OSError:
@@ -286,6 +294,18 @@ class Store:
                     self._unlink(self._part_path(up))
                     del self._uploads[uid]
                     removed += 1
+            registered = {f.path for f in self._files.values()}
+            registered |= {self._part_path(u) for u in self._uploads.values()}
+            # Anything on disk the registry does not know about (crash, lost state.json).
+            for d in (self.uploads_dir, self.files_dir):
+                for path in d.iterdir():
+                    try:
+                        if (path.is_file() and path not in registered
+                                and now - path.stat().st_mtime > self.ttl_seconds):
+                            path.unlink()
+                            removed += 1
+                    except FileNotFoundError:
+                        pass
             if removed:
                 self._save()
         return removed

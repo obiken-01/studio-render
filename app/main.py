@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.errors import register_error_handlers
+from app.middleware import RequestGuard
 from app.render.worker import RenderQueue, get_queue
 from app.routes import projects, renders, session, uploads
 from app.storage import Store, get_store
@@ -50,6 +51,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="studio-render", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
+    # Added first so it sits inside CORS: its 413 and 500 answers carry the CORS headers.
+    app.add_middleware(RequestGuard)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

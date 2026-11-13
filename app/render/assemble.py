@@ -3,12 +3,10 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from app.editlist import FPS, EditList
+from app.editlist import FPS, XFADE_FRAMES, XFADE_SEC, EditList
 from app.models import FileMeta
 from app.render.ffmpeg import run_ffmpeg
-from app.render.segments import XFADE_FRAMES
 
-_XFADE_SEC = XFADE_FRAMES / FPS
 _TB = "1/15360"
 
 
@@ -30,7 +28,7 @@ def _filter_graph(el: EditList, frames: list[int]) -> tuple[str, str]:
         if el.timeline[i - 1].transitionOut == "crossfade":
             offset = (acc_frames - XFADE_FRAMES) / FPS
             parts.append(
-                f"[{acc}][s{i}]xfade=transition=fade:duration={_XFADE_SEC:.6f}"
+                f"[{acc}][s{i}]xfade=transition=fade:duration={XFADE_SEC:.6f}"
                 f":offset={offset:.6f}[x{i}]")
             parts.append(f"[x{i}]fps={FPS},settb={_TB}[{out}]")
             acc_frames += frames[i] - XFADE_FRAMES

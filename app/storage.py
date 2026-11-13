@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import secrets
@@ -15,6 +16,8 @@ from app.config import Settings, get_settings
 from app.errors import ApiError
 from app.models import FileMeta, Upload
 from app.probe import probe_media
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 8 * 1024 * 1024
 MAX_AUDIO_SEC = 15 * 60
@@ -79,18 +82,30 @@ class Store:
     # ---- persistence (callers hold the lock, except __init__) ----
 
     def _load(self) -> None:
+        """Load what survived a restart. A broken or older-format state file must never stop
+        the service from starting: bad entries are skipped, the rest is kept."""
         try:
             raw = json.loads(self._state_path.read_text())
-        except (OSError, ValueError):
+            uploads, files = list(raw.get("uploads", [])), list(raw.get("files", []))
+        except FileNotFoundError:
             return
-        for u in raw.get("uploads", []):
-            up = Upload(**{**u, "received": set(u["received"])})
-            if self._part_path(up).exists():
-                self._uploads[up.upload_id] = up
-        for f in raw.get("files", []):
-            meta = FileMeta(**{**f, "path": Path(f["path"])})
-            if meta.path.exists():
-                self._files[meta.file_id] = meta
+        except Exception:
+            logger.warning("state file is unreadable, starting empty", exc_info=True)
+            return
+        for u in uploads:
+            try:
+                up = Upload(**{**u, "received": {int(n) for n in u["received"]}})
+                if self._part_path(up).exists():
+                    self._uploads[up.upload_id] = up
+            except Exception:
+                logger.warning("skipping a bad upload entry in the state file", exc_info=True)
+        for f in files:
+            try:
+                meta = FileMeta(**{**f, "path": Path(f["path"])})
+                if meta.path.exists():
+                    self._files[meta.file_id] = meta
+            except Exception:
+                logger.warning("skipping a bad file entry in the state file", exc_info=True)
 
     def _save(self) -> None:
         state = {

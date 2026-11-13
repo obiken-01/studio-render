@@ -8,9 +8,14 @@ from app.models import FileMeta
 
 ASPECTS = {"9:16": (1080, 1920), "16:9": (1920, 1080), "4:5": (1080, 1350)}
 FPS = 30
-XFADE_SEC = 0.15
-FRAME = 1 / 30
+FRAME = 1 / FPS
+# A crossfade overlaps two segments by this many frames. The renderer renders the segment
+# before it this many frames longer, so validation needs this much extra source footage.
+XFADE_FRAMES = 4
+XFADE_SEC = XFADE_FRAMES / FPS
 CONTIGUITY_TOL = 0.001
+MAX_SEGMENTS = 600
+MAX_BEATS = 5000
 
 
 def snap(t: float) -> float:
@@ -34,7 +39,7 @@ class Music(_Strict):
     startSec: float = Field(ge=0)
     endSec: float
     fadeOutSec: float = Field(default=0.0, ge=0)
-    beats: list[float] = Field(default_factory=list)
+    beats: list[float] = Field(default_factory=list, max_length=MAX_BEATS)
 
 
 class Crop(_Strict):
@@ -91,7 +96,7 @@ class EditList(_Strict):
     project: Project
     music: Music
     audioMode: Literal["music", "silent"]
-    timeline: list[Segment] = Field(min_length=1)
+    timeline: list[Segment] = Field(min_length=1, max_length=MAX_SEGMENTS)
 
 
 def _err(code: str, message: str, details: dict | None = None) -> ApiError:
@@ -184,4 +189,12 @@ def validate_for_render(el: EditList, files: Mapping[str, FileMeta]) -> None:
             )
 
     if el.audioMode == "music":
-        _lookup(files, el.music.fileId, "audio", "The music")
+        song = _lookup(files, el.music.fileId, "audio", "The music")
+        length = song.duration_sec or 0.0
+        if el.music.startSec < 0 or el.music.endSec > length + FRAME:
+            raise _err(
+                "bad_music_range",
+                "The chosen part of the song goes past the end of the song.",
+                {"startSec": el.music.startSec, "endSec": el.music.endSec,
+                 "songSec": round(length, 3)},
+            )

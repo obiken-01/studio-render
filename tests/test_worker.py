@@ -231,6 +231,27 @@ def test_restart_marks_unfinished_failed(store, settings, el):
         assert job.message == "The service restarted, please render again."
 
 
+GOOD_JOB = {"job_id": "rd_good", "status": "failed", "percent": 0, "message": "Nope.",
+            "output_path": None, "created_at": 1.0, "finished_at": 1.0}
+
+
+@pytest.mark.parametrize("content", [
+    "[]",
+    json.dumps([GOOD_JOB]),
+    json.dumps({"jobs": "nope"}),
+    json.dumps({"jobs": [5, "x", None, GOOD_JOB]}),
+    json.dumps({"jobs": [{"job_id": "rd_bad"}, GOOD_JOB]}),
+    json.dumps({"jobs": [{**GOOD_JOB, "job_id": "rd_bad", "output_path": 5}, GOOD_JOB]}),
+])
+def test_bad_jobs_file_does_not_stop_startup(store, settings, content):
+    (store.data_dir / "jobs.json").write_text(content)
+    q = RenderQueue(store, settings)
+    with pytest.raises(ApiError):
+        q.get("rd_bad")
+    if "rd_good" in content and not content.startswith("["):
+        assert q.get("rd_good")[0].status == "failed"
+
+
 def test_jobs_file_is_written_atomically(make_queue, el, store):
     q = make_queue(write_ok)
     job = q.submit(el)

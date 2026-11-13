@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import time
 from types import SimpleNamespace
@@ -331,6 +332,46 @@ def test_sweep_deletes_old_orphans_but_keeps_young_and_registered(store, tmp_pat
     assert young.exists() and meta.path.exists()
     assert (store.data_dir / "state.json").exists()
     assert store.get_upload(pending.upload_id)
+
+
+def _good_file_entry(store, file_id="up_good"):
+    path = store.files_dir / f"{file_id}.mp4"
+    path.write_bytes(b"x")
+    return {"file_id": file_id, "kind": "video", "path": str(path), "filename": "a.mp4",
+            "size": 1, "duration_sec": 1.0, "width": 320, "height": 240, "fps": 30.0,
+            "rotation": 0, "created_at": time.time()}
+
+
+@pytest.mark.parametrize("shape", [
+    "list", "files_not_list", "non_dict_entries", "missing_key", "extra_key", "bad_upload",
+])
+def test_bad_state_file_does_not_stop_startup(store, settings, shape):
+    good = _good_file_entry(store)
+    bad = _good_file_entry(store, "up_bad")
+    state = {"uploads": [], "files": [good]}
+    if shape == "list":
+        state = [good]
+    elif shape == "files_not_list":
+        state = {"uploads": 3, "files": "nope"}
+    elif shape == "non_dict_entries":
+        state["files"] = [5, None, "x", good]
+        state["uploads"] = [7]
+    elif shape == "missing_key":
+        del bad["path"]
+        state["files"] = [bad, good]
+    elif shape == "extra_key":
+        bad["colour"] = "blue"
+        state["files"] = [bad, good]
+    elif shape == "bad_upload":
+        state["uploads"] = [{"upload_id": "up_u", "received": 5}]
+    (settings.studio_data_dir / "state.json").write_text(json.dumps(state))
+    again = _small_store(settings)
+    with pytest.raises(ApiError):
+        again.get_file("up_bad")
+    if shape in ("non_dict_entries", "missing_key", "extra_key", "bad_upload"):
+        assert again.get_file("up_good").size == 1
+    with pytest.raises(ApiError):
+        again.get_upload("up_u")
 
 
 def test_corrupt_state_then_sweep_removes_old_files(store, settings, tmp_path):

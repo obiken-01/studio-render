@@ -3,8 +3,14 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
+
+_HTTP_ERRORS = {
+    404: ("not_found", "This address was not found."),
+    405: ("method_not_allowed", "This action is not allowed here."),
+}
 
 
 class ApiError(Exception):
@@ -40,6 +46,17 @@ def register_error_handlers(app: FastAPI) -> None:
         ]
         return _error(422, "invalid_request", "The request is not valid.", {"errors": fields})
 
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(_: Request, exc: StarletteHTTPException):
+        code, message = _HTTP_ERRORS.get(
+            exc.status_code, ("http_error", "The request could not be handled."))
+        response = _error(exc.status_code, code, message)
+        for name, value in (exc.headers or {}).items():
+            response.headers[name] = value
+        return response
+
+    # Normally RequestGuard (inside CORS) turns a crash into this envelope first; this is the
+    # last line of defence for anything that escapes it.
     @app.exception_handler(Exception)
     async def _unhandled(_: Request, exc: Exception):
         logger.error("Unhandled error", exc_info=exc)

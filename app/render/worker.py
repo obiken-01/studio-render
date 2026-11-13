@@ -78,22 +78,27 @@ class RenderQueue:
     # ---- persistence (callers hold the lock, except __init__) ----
 
     def _load(self) -> None:
+        # A broken or older-format jobs file must never stop the service from starting.
         try:
-            raw = json.loads(self._path.read_text())
-        except (OSError, ValueError):
-            raw = {}
-        for j in raw.get("jobs", []):
+            entries = list(json.loads(self._path.read_text()).get("jobs", []))
+        except FileNotFoundError:
+            entries = []
+        except Exception:
+            logger.warning("jobs file is unreadable, starting empty", exc_info=True)
+            entries = []
+        for j in entries:
             try:
                 job = Job(**{**j, "output_path": Path(j["output_path"])
                              if j.get("output_path") else None})
-            except (TypeError, ValueError):
-                continue
-            if job.status in ("queued", "running"):
-                job.status, job.message = "failed", RESTARTED
-                job.finished_at = self.clock()
-            if job.status == "done" and not (job.output_path and job.output_path.exists()):
-                continue
-            self._jobs[job.job_id] = job
+                if job.status in ("queued", "running"):
+                    job.status, job.message = "failed", RESTARTED
+                    job.finished_at = self.clock()
+                if job.status == "done" and not (job.output_path
+                                                 and job.output_path.exists()):
+                    continue
+                self._jobs[job.job_id] = job
+            except Exception:
+                logger.warning("skipping a bad entry in the jobs file", exc_info=True)
         # Whatever a crashed run left behind is unreachable now.
         keep = {j.output_path for j in self._jobs.values() if j.output_path}
         for f in self.store.renders_dir.iterdir():

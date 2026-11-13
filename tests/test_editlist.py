@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.editlist import EditList, snap, validate_for_render, validate_structure
+from app.editlist import (
+    XFADE_FRAMES,
+    XFADE_SEC,
+    EditList,
+    snap,
+    validate_for_render,
+    validate_structure,
+)
 from app.errors import ApiError
 from app.models import FileMeta
 
@@ -113,6 +120,65 @@ def test_crossfade_with_tail_footage_passes():
     d = good()
     d["timeline"][0]["transitionOut"] = "crossfade"
     validate_for_render(EditList.model_validate(d), FILES)
+
+
+def _music_at(d, start, end):
+    d["music"].update(startSec=start, endSec=end)
+
+
+def test_music_past_the_end_of_the_song_rejected():
+    d = good()
+    _music_at(d, 58.0, 61.0)  # the song is 60 s long
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert (e.value.status, e.value.code) == (422, "bad_music_range")
+    assert "song" in e.value.message
+
+
+def test_music_up_to_one_frame_past_the_end_passes():
+    d = good()
+    _music_at(d, 57.0 + 1 / 60, 60.0 + 1 / 60)
+    validate_for_render(EditList.model_validate(d), FILES)
+
+
+def test_music_range_ignored_when_silent():
+    d = good()
+    _music_at(d, 58.0, 61.0)
+    d["audioMode"] = "silent"
+    validate_for_render(EditList.model_validate(d), FILES)
+
+
+def test_crossfade_tail_is_four_frames():
+    assert XFADE_FRAMES == 4 and XFADE_SEC == pytest.approx(4 / 30)
+    d = good()
+    d["timeline"][0]["transitionOut"] = "crossfade"
+    d["timeline"][0]["source"].update(inSec=20.0 - 1.0 - 4 / 30, outSec=20.0 - 4 / 30)
+    validate_for_render(EditList.model_validate(d), FILES)
+    d["timeline"][0]["source"].update(inSec=20.0 - 1.0 - 3 / 30, outSec=20.0 - 3 / 30)
+    with pytest.raises(ApiError) as e:
+        validate_for_render(EditList.model_validate(d), FILES)
+    assert e.value.code == "bad_trim"
+
+
+def test_timeline_length_is_bounded():
+    d = good()
+    d["music"].update(startSec=0.0, endSec=601 / 30)
+    d["timeline"] = [{"type": "empty", "slotStartSec": i / 30, "durationSec": 1 / 30}
+                     for i in range(601)]
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)
+    d["timeline"] = d["timeline"][:600]
+    d["music"]["endSec"] = 20.0
+    EditList.model_validate(d)
+
+
+def test_beat_list_is_bounded():
+    d = good()
+    d["music"]["beats"] = [0.5] * 5001
+    with pytest.raises(ValidationError):
+        EditList.model_validate(d)
+    d["music"]["beats"] = [0.5] * 5000
+    EditList.model_validate(d)
 
 
 def test_focus_out_of_range_rejected():

@@ -1,13 +1,12 @@
 """Stage 1: argument lists that turn one timeline segment into a normalised mp4."""
 from pathlib import Path
 
-from app.editlist import FPS, PhotoSegment, VideoSegment
+from app.editlist import FPS, XFADE_FRAMES, PhotoSegment, VideoSegment
 from app.models import FileMeta
 from app.render.crop import cover_crop
 
-# A crossfade overlaps two segments by this many frames (about XFADE_SEC), so the segment
-# before it is rendered this many frames longer to keep the total length unchanged.
-XFADE_FRAMES = 4
+# A crossfade overlaps two segments by XFADE_FRAMES (defined with the validation rules), so
+# the segment before it is rendered that many frames longer to keep the total length unchanged.
 ZOOM_MAX = 1.15
 
 _ENCODE = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-g", str(FPS),
